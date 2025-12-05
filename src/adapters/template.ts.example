@@ -1,0 +1,119 @@
+/**
+ * Template for adding a new AI CLI tool adapter
+ * 
+ * To add a new tool (e.g., OpenAI Codex):
+ * 1. Copy this file to src/adapters/codex.ts
+ * 2. Implement the ToolAdapter interface
+ * 3. Register in src/adapters/index.ts
+ * 4. Add to sdk-session.ts tool list
+ */
+
+import { ToolAdapter, SendOptions } from './base.js';
+import { commandExists, stripAnsi } from '../utils.js';
+import { spawn } from 'child_process';
+
+export class CodexAdapter implements ToolAdapter {
+  // Unique identifier - used in commands like //codex
+  readonly name = 'codex';
+  
+  // Display name for UI
+  readonly displayName = 'OpenAI Codex';
+
+  // Track if we have an active session
+  private hasActiveSession = false;
+
+  /**
+   * Check if the CLI tool is installed
+   * Returns true if the command exists in PATH
+   */
+  async isAvailable(): Promise<boolean> {
+    // Replace 'codex' with the actual CLI command name
+    return commandExists('codex');
+  }
+
+  /**
+   * Build the command array for executing the tool
+   * This should handle session continuation flags
+   */
+  getCommand(prompt: string, options?: SendOptions): string[] {
+    const args: string[] = [];
+    
+    // Add session continuation flag if needed
+    // Example: --continue, --resume, etc.
+    if (this.hasActiveSession) {
+      args.push('--continue'); // Adjust based on the tool's CLI
+    }
+
+    // Add working directory if specified
+    if (options?.cwd) {
+      args.push('--cwd', options.cwd);
+    }
+
+    // Add the prompt
+    args.push(prompt);
+
+    return ['codex', ...args];
+  }
+
+  /**
+   * Send a prompt to the tool and return the response
+   * This is used in "print mode" (non-interactive)
+   */
+  async send(prompt: string, options?: SendOptions): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const args = this.getCommand(prompt, options).slice(1);
+
+      const proc = spawn('codex', args, {
+        cwd: options?.cwd || process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: process.env,
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        const text = data.toString();
+        process.stdout.write(text); // Stream to user
+        stdout += text;
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(`Codex exited with code ${code}: ${stderr || stdout}`));
+        } else {
+          this.hasActiveSession = true;
+          resolve(stripAnsi(stdout).trim());
+        }
+      });
+
+      proc.on('error', reject);
+    });
+  }
+
+  /**
+   * Reset the conversation context
+   */
+  resetContext(): void {
+    this.hasActiveSession = false;
+  }
+
+  /**
+   * Check if there's an active session
+   */
+  hasSession(): boolean {
+    return this.hasActiveSession;
+  }
+
+  /**
+   * Set session state (for persistence)
+   */
+  setHasSession(value: boolean): void {
+    this.hasActiveSession = value;
+  }
+}
+

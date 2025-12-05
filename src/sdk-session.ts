@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
-import { createInterface, Interface } from 'readline';
 import * as pty from 'node-pty';
 import { IPty } from 'node-pty';
+import { select } from '@inquirer/prompts';
 import { stripAnsi } from './utils.js';
 
 interface Message {
@@ -68,7 +68,21 @@ ${colors.brightCyan}    ██║  ██║${colors.brightMagenta}██║${co
 ${colors.brightCyan}    ╚═╝  ╚═╝${colors.brightMagenta}╚═╝${colors.brightYellow} ╚═════╝${colors.reset}
 `;
 
-const TAGLINE = `${colors.dim}─────${colors.reset} ${colors.brightCyan}A${colors.brightMagenta}I${colors.reset} ${colors.brightYellow}C${colors.white}ode${colors.reset} ${colors.brightYellow}C${colors.white}onnect${colors.reset} ${colors.dim}─────${colors.reset}`;
+const VERSION = 'v1.0.0';
+const TAGLINE = `${colors.dim}─────${colors.reset} ${colors.brightCyan}A${colors.brightMagenta}I${colors.reset} ${colors.brightYellow}C${colors.white}ode${colors.reset} ${colors.brightYellow}C${colors.white}onnect${colors.reset} ${colors.dim}${VERSION} ─────${colors.reset}`;
+
+// AIC command definitions
+const AIC_COMMANDS = [
+  { value: '//claude', name: `${colors.brightCyan}//claude${colors.reset}       Switch to Claude Code`, description: 'Switch to Claude Code' },
+  { value: '//gemini', name: `${colors.brightMagenta}//gemini${colors.reset}       Switch to Gemini CLI`, description: 'Switch to Gemini CLI' },
+  { value: '//i', name: `${colors.brightYellow}//i${colors.reset}            Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] to detach)' },
+  { value: '//forward', name: `${colors.brightGreen}//forward${colors.reset}      Forward last response`, description: 'Forward last response to other tool' },
+  { value: '//history', name: `${colors.blue}//history${colors.reset}      Show conversation`, description: 'Show conversation history' },
+  { value: '//status', name: `${colors.gray}//status${colors.reset}       Show running processes`, description: 'Show daemon status' },
+  { value: '//clear', name: `${colors.red}//clear${colors.reset}        Clear sessions`, description: 'Clear sessions and history' },
+  { value: '//quit', name: `${colors.dim}//quit${colors.reset}         Exit`, description: 'Exit AIC' },
+  { value: '//cya', name: `${colors.dim}//cya${colors.reset}          Exit (alias)`, description: 'Exit AIC' },
+];
 
 function drawBox(content: string[], width: number = 50): string {
   const top = `${colors.gray}╭${'─'.repeat(width - 2)}╮${colors.reset}`;
@@ -124,7 +138,6 @@ class Spinner {
  * - Interactive mode: persistent PTY process, detach with Ctrl+]
  */
 export class SDKSession {
-  private rl: Interface | null = null;
   private isRunning = false;
   private activeTool: 'claude' | 'gemini' = 'claude';
   private conversationHistory: Message[] = [];
@@ -196,44 +209,169 @@ export class SDKSession {
     return `${cursor.show}${cursor.blockBlink}${toolColor}❯ ${toolName}${colors.reset} ${colors.dim}→${colors.reset} `;
   }
 
-  private async runLoop(): Promise<void> {
-    this.rl = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    const prompt = () => {
-      if (!this.isRunning) return;
-      
-      this.rl!.question(this.getPrompt(), async (input) => {
-        // Filter out iTerm focus events and other escape sequences
-        const cleaned = input
-          .replace(/\x1b\[I/g, '')  // Focus in
-          .replace(/\x1b\[O/g, '')  // Focus out
-          .replace(/\^\[\[I/g, '')  // Focus in (literal)
-          .replace(/\^\[\[O/g, '')  // Focus out (literal)
-          .trim();
-        const trimmed = cleaned;
-
-        if (!trimmed) {
-          prompt();
-          return;
-        }
-
-        // Handle meta commands (double slash)
-        if (trimmed.startsWith('//')) {
-          await this.handleMetaCommand(trimmed.slice(2));
-          prompt();
-          return;
-        }
-
-        // Send to active tool
-        await this.sendToTool(trimmed);
-        prompt();
+  private async showCommandMenu(): Promise<string | null> {
+    try {
+      const answer = await select({
+        message: `${colors.brightYellow}Select a command:${colors.reset}`,
+        choices: AIC_COMMANDS,
+        loop: true,
       });
-    };
+      return answer;
+    } catch (e) {
+      // User cancelled (Ctrl+C)
+      return null;
+    }
+  }
 
-    prompt();
+  private async runLoop(): Promise<void> {
+    await this.promptLoop();
+  }
+
+  private async promptLoop(): Promise<void> {
+    while (this.isRunning) {
+      const input = await this.readInputWithSlashDetection();
+      
+      if (!input || !input.trim()) continue;
+      
+      const trimmed = input.trim();
+
+      // Handle meta commands (double slash)
+      if (trimmed.startsWith('//')) {
+        await this.handleMetaCommand(trimmed.slice(2));
+        continue;
+      }
+
+      // Send to active tool
+      await this.sendToTool(trimmed);
+    }
+  }
+
+  private readInputWithSlashDetection(): Promise<string> {
+    return new Promise((resolve) => {
+      let buffer = '';
+      let hintsShown = false;
+      const HINT_LINES = 10; // Number of hint lines we show
+      
+      // Show prompt
+      process.stdout.write(this.getPrompt());
+      
+      // Set raw mode for keypress detection
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+      }
+      process.stdin.resume();
+
+      const clearHints = () => {
+        if (hintsShown) {
+          // Save cursor, go down to hints, clear them, restore cursor
+          process.stdout.write('\x1b[s'); // Save cursor position
+          process.stdout.write('\n'); // Move to next line
+          for (let i = 0; i < HINT_LINES; i++) {
+            process.stdout.write('\x1b[2K\x1b[B'); // Clear line, move down
+          }
+          process.stdout.write('\x1b[u'); // Restore cursor position
+          hintsShown = false;
+        }
+      };
+
+      const showHints = () => {
+        if (!hintsShown) {
+          // Save cursor position
+          process.stdout.write('\x1b[s');
+          // Move to next line and show hints
+          process.stdout.write('\n');
+          process.stdout.write(`${colors.dim}  ↓ down to select, or keep typing${colors.reset}\n`);
+          process.stdout.write(`${colors.dim}  ─────────────────────────────────${colors.reset}\n`);
+          AIC_COMMANDS.slice(0, 7).forEach(cmd => {
+            process.stdout.write(`  ${cmd.name}\n`);
+          });
+          // Restore cursor to input line
+          process.stdout.write('\x1b[u');
+          hintsShown = true;
+        }
+      };
+
+      const cleanup = () => {
+        process.stdin.removeListener('data', onData);
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+        if (hintsShown) {
+          // Clear hints before exiting
+          process.stdout.write('\x1b[s');
+          process.stdout.write('\n');
+          for (let i = 0; i < HINT_LINES; i++) {
+            process.stdout.write('\x1b[2K\x1b[B');
+          }
+          process.stdout.write('\x1b[u');
+          hintsShown = false;
+        }
+      };
+
+      const onData = async (data: Buffer) => {
+        const char = data.toString();
+        
+        // Handle Enter
+        if (char === '\r' || char === '\n') {
+          cleanup();
+          process.stdout.write('\n');
+          resolve(buffer);
+          return;
+        }
+        
+        // Handle Ctrl+C
+        if (char === '\x03') {
+          cleanup();
+          console.log('\n');
+          resolve('//quit');
+          return;
+        }
+        
+        // Handle Backspace
+        if (char === '\x7f' || char === '\b') {
+          if (buffer.length > 0) {
+            buffer = buffer.slice(0, -1);
+            process.stdout.write('\b \b');
+            // Hide hints if we backspace past the slash
+            if (!buffer.startsWith('/')) {
+              clearHints();
+            }
+          }
+          return;
+        }
+
+        // Handle Down Arrow - enter selection mode if hints are shown
+        if (char === '\x1b[B' && hintsShown) {
+          cleanup();
+          process.stdout.write('\n');
+          const selected = await this.showCommandMenu();
+          if (selected) {
+            resolve(selected);
+          } else {
+            resolve('');
+          }
+          return;
+        }
+
+        // Filter out other escape sequences (iTerm focus events etc)
+        if (char.startsWith('\x1b')) {
+          return;
+        }
+        
+        // Regular character - write it
+        buffer += char;
+        process.stdout.write(char);
+        
+        // Show hints when user types "/" or "//"
+        if (buffer === '/' || buffer === '//') {
+          showHints();
+        } else if (!buffer.startsWith('/')) {
+          clearHints();
+        }
+      };
+
+      process.stdin.on('data', onData);
+    });
   }
 
   private async handleMetaCommand(cmd: string): Promise<void> {
@@ -247,7 +385,6 @@ export class SDKSession {
         await this.cleanup();
         console.log(`\n${colors.brightYellow}👋 Goodbye!${colors.reset}\n`);
         this.isRunning = false;
-        this.rl?.close();
         process.exit(0);
         break;
 
@@ -474,8 +611,7 @@ export class SDKSession {
     // Clear the output buffer for fresh capture
     this.interactiveOutputBuffer.set(this.activeTool, '');
 
-    // Pause readline while in interactive mode
-    this.rl?.pause();
+    // Interactive mode takes over stdin
 
     return new Promise((resolve) => {
       // Spawn new process if needed
@@ -564,7 +700,6 @@ export class SDKSession {
           
           console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
           console.log(`${colors.dim}Use ${colors.brightYellow}//i${colors.dim} to re-attach • ${colors.brightGreen}//forward${colors.dim} to send to other tool${colors.reset}\n`);
-          this.rl?.resume();
           resolve();
           return;
         }
@@ -579,7 +714,6 @@ export class SDKSession {
         if (!detached) {
           cleanup();
           console.log(`\n${colors.dim}Returned to ${colors.brightYellow}aic${colors.reset}\n`);
-          this.rl?.resume();
           resolve();
         }
       };
