@@ -13,7 +13,7 @@ import { commandExists, stripAnsi } from '../utils.js';
 import { spawn } from 'child_process';
 
 export class CodexAdapter implements ToolAdapter {
-  // Unique identifier - used in commands like //codex
+  // Unique identifier - used in commands like /codex
   readonly name = 'codex';
   
   // Display name for UI

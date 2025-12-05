@@ -73,12 +73,12 @@ export class InteractiveSession {
 
     console.log('\n' + '─'.repeat(50));
     console.log('Commands:');
-    console.log('  //claude              - Switch to Claude');
-    console.log('  //gemini              - Switch to Gemini');
-    console.log('  //forward [tool] [msg] - Forward last response');
-    console.log('  //status              - Show daemon status');
-    console.log('  //quit                - Exit');
-    console.log('  (Single / commands like /cost go directly to the tool)');
+    console.log('  /claude               - Switch to Claude');
+    console.log('  /gemini               - Switch to Gemini');
+    console.log('  /forward [tool] [msg] - Forward last response');
+    console.log('  /status               - Show daemon status');
+    console.log('  /quit                 - Exit');
+    console.log('  (Use // for tool commands, e.g., //status - enters tool interactive mode)');
     console.log('─'.repeat(50));
     console.log(`\nActive tool: ${this.manager.getActive()?.displayName}`);
     console.log('Type your message and press Enter. Output streams in real-time.\n');
@@ -110,9 +110,38 @@ export class InteractiveSession {
           return;
         }
 
-        // Handle our meta commands (double slash)
+        // Handle double slash - strip one slash and pass to backend tool
+        // e.g., //cost -> /cost sent to Claude/Gemini
         if (trimmed.startsWith('//')) {
-          await this.handleMetaCommand(trimmed.slice(2));
+          const daemon = this.manager.getActive();
+          if (daemon && daemon.isReady()) {
+            try {
+              console.log('');
+              const response = await daemon.send(trimmed.slice(1));
+              this.conversationHistory.push({
+                tool: daemon.name,
+                role: 'user',
+                content: trimmed.slice(1),
+              });
+              this.conversationHistory.push({
+                tool: daemon.name,
+                role: 'assistant',
+                content: stripAnsi(response).trim(),
+              });
+              console.log('');
+            } catch (error) {
+              console.error(`Error: ${error instanceof Error ? error.message : error}`);
+            }
+          } else {
+            console.error('No active tool or tool not ready');
+          }
+          prompt();
+          return;
+        }
+
+        // Handle AIC meta commands (single slash)
+        if (trimmed.startsWith('/')) {
+          await this.handleMetaCommand(trimmed.slice(1));
           prompt();
           return;
         }
@@ -164,7 +193,7 @@ export class InteractiveSession {
   }
 
   /**
-   * Handle meta commands (///command)
+   * Handle AIC meta commands (/command)
    */
   private async handleMetaCommand(cmd: string): Promise<void> {
     const parts = cmd.split(/\s+/);
@@ -201,14 +230,14 @@ export class InteractiveSession {
         break;
 
       default:
-        console.log(`Unknown command: //${command}`);
-        console.log('Available: //claude, //gemini, //forward, //status, //quit');
+        console.log(`Unknown command: /${command}`);
+        console.log('Available: /claude, /gemini, /forward, /status, /quit');
     }
   }
 
   /**
    * Forward last response to another tool
-   * Syntax: //forward [tool] [message]
+   * Syntax: /forward [tool] [message]
    * - If only 2 tools: tool is optional (auto-selects the other)
    * - If 3+ tools: tool is required
    */
@@ -244,7 +273,7 @@ export class InteractiveSession {
       } else {
         // Multiple tools available - require explicit selection
         console.log(`Multiple tools available. Please specify target:`);
-        console.log(`  //forward <${otherTools.join('|')}> [message]`);
+        console.log(`  /forward <${otherTools.join('|')}> [message]`);
         return;
       }
     }

@@ -72,20 +72,38 @@ That's it! This launches the interactive session.
 
 | Command | Description |
 |---------|-------------|
-| `//claude` | Switch to Claude Code |
-| `//gemini` | Switch to Gemini CLI |
-| `//i` | Enter interactive mode (full tool access) |
-| `//forward` | Forward last response to other tool (auto-selects if 2 tools) |
-| `//forward [tool]` | Forward to specific tool (required if 3+ tools) |
-| `//forward [tool] [msg]` | Forward with additional context |
-| `//history` | Show conversation history |
-| `//status` | Show running processes |
-| `//clear` | Clear sessions and history |
-| `//quit` or `//cya` | Exit |
+| `/claude` | Switch to Claude Code |
+| `/gemini` | Switch to Gemini CLI |
+| `/i` | Enter interactive mode (full tool access) |
+| `/forward` | Forward last response to other tool (auto-selects if 2 tools) |
+| `/forward [tool]` | Forward to specific tool (required if 3+ tools) |
+| `/forward [tool] [msg]` | Forward with additional context |
+| `/history` | Show conversation history |
+| `/status` | Show running processes |
+| `/clear` | Clear sessions and history |
+| `/quit` or `/cya` | Exit |
+
+### Tool Slash Commands
+
+Use double slash (`//`) to run tool-specific slash commands:
+
+| Input | What Happens |
+|-------|--------------|
+| `//cost` | Opens interactive mode, runs `/cost`, you see output |
+| `//status` | Opens interactive mode, runs `/status`, you can interact |
+| `//config` | Opens interactive mode, runs `/config`, full control |
+
+When you type `//command`:
+1. AIC enters interactive mode with the tool
+2. Sends the `/command` for you
+3. You see the full output and can interact
+4. Press `Ctrl+]` when done to return to AIC
+
+This approach ensures you can fully view and interact with commands like `/status` that show interactive UIs.
 
 ### Command Menu
 
-Type `/` or `//` to see a command menu. Use ↓ arrow to select, or keep typing.
+Type `/` to see a command menu. Use ↓ arrow to select, or keep typing.
 
 ### Example Session
 
@@ -95,7 +113,7 @@ Type `/` or `//` to see a command menu. Use ↓ arrow to select, or keep typing.
 ⠹ Claude is thinking...
 I suggest implementing a Redis-based caching layer...
 
-❯ claude → //forward What do you think of this approach?
+❯ claude → /forward What do you think of this approach?
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ↗ Forwarding from Claude Code → Gemini CLI
@@ -104,7 +122,7 @@ Gemini CLI responds:
 
 The Redis approach is solid. I'd also consider...
 
-❯ gemini → //claude
+❯ gemini → /claude
 ● Switched to Claude Code
 
 ❯ claude → Can you implement that?
@@ -112,22 +130,21 @@ The Redis approach is solid. I'd also consider...
 
 ### Interactive Mode
 
-For full tool access (slash commands, approvals, etc.):
+For full tool access (approvals, multi-turn interactions, etc.):
 
 ```bash
-❯ claude → //i
+❯ claude → /i
 
 ▶ Starting Claude Code interactive mode...
 Press Ctrl+] to detach • /exit to terminate
 
-> /cost                    # Claude's slash command
-> /config                  # Another slash command
+> (interact with Claude directly)
 > (press Ctrl+])           # Detach back to aic
 
 ⏸ Detached from Claude Code (still running)
-Use //i to re-attach
+Use /i to re-attach
 
-❯ claude → //i             # Re-attach to same session
+❯ claude → /i              # Re-attach to same session
 ↩ Re-attaching to Claude Code...
 ```
 
@@ -135,7 +152,9 @@ Use //i to re-attach
 - `Ctrl+]` - Detach (tool keeps running)
 - `/exit` - Terminate the tool session
 
-> **Note:** Messages exchanged while in interactive mode (after `//i`) are not captured for forwarding. Use regular mode for conversations you want to forward between tools.
+> **Tip:** Use `//status` or `//cost` to quickly run tool commands—AIC will enter interactive mode, run the command, and you press `Ctrl+]` when done.
+
+> **Note:** Messages exchanged while in interactive mode (after `/i`) are not captured for forwarding. Use regular mode for conversations you want to forward between tools.
 
 ### Session Persistence
 
@@ -148,11 +167,37 @@ Your conversation context is maintained across messages.
 ## CLI Options
 
 ```bash
-aic              # Launch interactive session (default)
-aic tools        # List available AI tools
-aic --version    # Show version
-aic --help       # Show help
+aic                         # Launch interactive session
+aic tools                   # List available AI tools
+aic config default          # Show current default tool
+aic config default gemini   # Set Gemini as default tool
+aic --version               # Show version
+aic --help                  # Show help
 ```
+
+## Configuration
+
+### Default Tool
+
+Set which tool loads by default when you start AIC²:
+
+**Option 1: CLI command**
+```bash
+aic config default gemini
+```
+
+**Option 2: Inside AIC²**
+```
+❯ claude → /default gemini
+✓ Default tool set to "gemini". Will be used on next launch.
+```
+
+**Option 3: Environment variable (temporary override)**
+```bash
+AIC_DEFAULT_TOOL=gemini aic
+```
+
+Configuration is stored in `~/.aic/config.json`.
 
 ## Architecture
 
@@ -182,6 +227,7 @@ See [ADDINGAI_CLIs.md](ADDINGAI_CLIs.md) for detailed instructions.
 ## Features
 
 - ✅ **Colorful UI** - ASCII banner, colored prompts, status indicators
+- ✅ **Rainbow animations** - Animated rainbow effect on slash commands
 - ✅ **Spinner** - Visual feedback while waiting for responses
 - ✅ **Session persistence** - Context maintained across messages
 - ✅ **Interactive mode** - Full tool access with detach/reattach

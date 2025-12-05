@@ -31,7 +31,7 @@ import { commandExists, stripAnsi } from '../utils.js';
 import { spawn } from 'child_process';
 
 export class CodexAdapter implements ToolAdapter {
-  readonly name = 'codex';           // Used in //codex command
+  readonly name = 'codex';           // Used in /codex command
   readonly displayName = 'OpenAI Codex';  // Shown in UI
   
   private hasActiveSession = false;
@@ -127,7 +127,7 @@ if (this.activeTool === 'codex') {
 
 6. **Add to command menu** (AIC_COMMANDS array):
 ```typescript
-{ value: '//codex', name: '//codex        Switch to Codex', description: 'Switch to OpenAI Codex' },
+{ value: '/codex', name: '/codex         Switch to Codex', description: 'Switch to OpenAI Codex' },
 ```
 
 7. **Add to handleMetaCommand switch**:
@@ -163,7 +163,7 @@ const TOOL_CONFIGS: ToolConfig[] = [
 ```bash
 npm run build
 aic tools  # Verify new tool shows up
-aic        # Test switching to new tool with //codex
+aic        # Test switching to new tool with /codex
 ```
 
 ## Key Considerations
@@ -175,14 +175,14 @@ Each CLI tool handles session continuation differently:
 - **Your tool**: Check your tool's documentation
 
 ### Forward Behavior
-The `//forward` command behavior changes based on how many tools are registered:
-- **2 tools**: `//forward` auto-selects the other tool (no argument needed)
-- **3+ tools**: User must specify target: `//forward <tool> [message]`
+The `/forward` command behavior changes based on how many tools are registered:
+- **2 tools**: `/forward` auto-selects the other tool (no argument needed)
+- **3+ tools**: User must specify target: `/forward <tool> [message]`
 
 This is handled automatically—no additional code needed when adding tools.
 
 ### Interactive Mode
-For interactive mode (//i), the tool needs to support running in a PTY.
+For interactive mode (`/i`), the tool needs to support running in a PTY.
 Most CLI tools do, but check if yours has any special requirements.
 
 ### Colors

@@ -5,6 +5,7 @@ import { IPty } from 'node-pty';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
 import { stripAnsi } from './utils.js';
+import { getDefaultTool, setDefaultTool } from './config.js';
 
 /**
  * Get the version of a CLI tool
@@ -87,6 +88,54 @@ const colors = {
   bgCyan: '\x1b[46m',
 };
 
+// Rainbow colors for animated effect
+const RAINBOW_COLORS = [
+  '\x1b[91m', // bright red
+  '\x1b[93m', // bright yellow
+  '\x1b[92m', // bright green
+  '\x1b[96m', // bright cyan
+  '\x1b[94m', // bright blue
+  '\x1b[95m', // bright magenta
+];
+
+/**
+ * Apply rainbow gradient to text (static)
+ */
+function rainbowText(text: string, offset: number = 0): string {
+  let result = '';
+  for (let i = 0; i < text.length; i++) {
+    const colorIndex = (i + offset) % RAINBOW_COLORS.length;
+    result += RAINBOW_COLORS[colorIndex] + text[i];
+  }
+  return result + colors.reset;
+}
+
+/**
+ * Animate rainbow text in place
+ */
+function animateRainbow(text: string, duration: number = 600): Promise<void> {
+  return new Promise((resolve) => {
+    let offset = 0;
+    const startTime = Date.now();
+    
+    const animate = () => {
+      const elapsed = Date.now() - startTime;
+      if (elapsed >= duration) {
+        // Final render
+        process.stdout.write('\r' + rainbowText(text, offset) + '  ');
+        resolve();
+        return;
+      }
+      
+      process.stdout.write('\r' + rainbowText(text, offset));
+      offset = (offset + 1) % RAINBOW_COLORS.length;
+      setTimeout(animate, 50);
+    };
+    
+    animate();
+  });
+}
+
 // Get terminal width (with fallback)
 function getTerminalWidth(): number {
   return process.stdout.columns || 80;
@@ -136,17 +185,19 @@ function getToolDisplayName(name: string): string {
   return getToolConfig(name)?.displayName || name;
 }
 
-// AIC command definitions
+// AIC command definitions (single slash for AIC commands)
 const AIC_COMMANDS = [
-  { value: '//claude', name: `${colors.brightCyan}//claude${colors.reset}       Switch to Claude Code`, description: 'Switch to Claude Code' },
-  { value: '//gemini', name: `${colors.brightMagenta}//gemini${colors.reset}       Switch to Gemini CLI`, description: 'Switch to Gemini CLI' },
-  { value: '//i', name: `${colors.brightYellow}//i${colors.reset}            Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] to detach)' },
-  { value: '//forward', name: `${colors.brightGreen}//forward${colors.reset}      Forward last response`, description: 'Forward response: //forward [tool] [msg]' },
-  { value: '//history', name: `${colors.blue}//history${colors.reset}      Show conversation`, description: 'Show conversation history' },
-  { value: '//status', name: `${colors.gray}//status${colors.reset}       Show running processes`, description: 'Show daemon status' },
-  { value: '//clear', name: `${colors.red}//clear${colors.reset}        Clear sessions`, description: 'Clear sessions and history' },
-  { value: '//quit', name: `${colors.dim}//quit${colors.reset}         Exit`, description: 'Exit AIC' },
-  { value: '//cya', name: `${colors.dim}//cya${colors.reset}          Exit (alias)`, description: 'Exit AIC' },
+  { value: '/claude', name: `${rainbowText('/claude')}        Switch to Claude Code`, description: 'Switch to Claude Code' },
+  { value: '/gemini', name: `${rainbowText('/gemini', 1)}        Switch to Gemini CLI`, description: 'Switch to Gemini CLI' },
+  { value: '/i', name: `${rainbowText('/i', 2)}             Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] to detach)' },
+  { value: '/forward', name: `${rainbowText('/forward', 3)}       Forward last response`, description: 'Forward response: /forward [tool] [msg]' },
+  { value: '/history', name: `${rainbowText('/history', 4)}       Show conversation`, description: 'Show conversation history' },
+  { value: '/status', name: `${rainbowText('/status', 5)}        Show running processes`, description: 'Show daemon status' },
+  { value: '/default', name: `${rainbowText('/default', 0)}       Set default tool`, description: 'Set default tool: /default <claude|gemini>' },
+  { value: '/help', name: `${rainbowText('/help', 1)}          Show help`, description: 'Show available commands' },
+  { value: '/clear', name: `${rainbowText('/clear', 2)}         Clear sessions`, description: 'Clear sessions and history' },
+  { value: '/quit', name: `${rainbowText('/quit', 3)}          Exit`, description: 'Exit AIC' },
+  { value: '/cya', name: `${rainbowText('/cya', 4)}           Exit (alias)`, description: 'Exit AIC' },
 ];
 
 function drawBox(content: string[], width: number = 50): string {
@@ -204,7 +255,7 @@ class Spinner {
  */
 export class SDKSession {
   private isRunning = false;
-  private activeTool: 'claude' | 'gemini' = 'claude';
+  private activeTool: 'claude' | 'gemini';
   private conversationHistory: Message[] = [];
   
   // Session tracking (for print mode)
@@ -226,6 +277,8 @@ export class SDKSession {
 
   constructor(cwd?: string) {
     this.cwd = cwd || process.cwd();
+    // Load default tool from config (or env var)
+    this.activeTool = getDefaultTool() as 'claude' | 'gemini';
   }
 
   async start(): Promise<void> {
@@ -233,6 +286,47 @@ export class SDKSession {
     process.stdout.write(cursor.show + cursor.blockBlink);
     
     const width = getTerminalWidth();
+    
+    // Get tool versions to check availability
+    const claudeVersion = getToolVersion('claude');
+    const geminiVersion = getToolVersion('gemini');
+    const claudeAvailable = claudeVersion !== null;
+    const geminiAvailable = geminiVersion !== null;
+    const availableCount = (claudeAvailable ? 1 : 0) + (geminiAvailable ? 1 : 0);
+
+    // Handle no tools available
+    if (availableCount === 0) {
+      console.log('');
+      console.log(`${colors.red}✗ No AI tools found!${colors.reset}`);
+      console.log('');
+      console.log(`${colors.dim}AIC² bridges multiple AI CLI tools. Please install both:${colors.reset}`);
+      console.log('');
+      console.log(`  ${colors.brightCyan}Claude Code${colors.reset}: npm install -g @anthropic-ai/claude-code`);
+      console.log(`  ${colors.brightMagenta}Gemini CLI${colors.reset}:  npm install -g @google/gemini-cli`);
+      console.log('');
+      process.exit(1);
+    }
+
+    // Handle only one tool available
+    if (availableCount === 1) {
+      const availableTool = claudeAvailable ? 'Claude Code' : 'Gemini CLI';
+      const availableCmd = claudeAvailable ? 'claude' : 'gemini';
+      const missingTool = claudeAvailable ? 'Gemini CLI' : 'Claude Code';
+      const missingInstall = claudeAvailable 
+        ? 'npm install -g @google/gemini-cli'
+        : 'npm install -g @anthropic-ai/claude-code';
+      
+      console.log('');
+      console.log(`${colors.yellow}⚠ Only ${availableTool} found${colors.reset}`);
+      console.log('');
+      console.log(`${colors.dim}AIC² bridges multiple AI tools - you need both installed.${colors.reset}`);
+      console.log(`${colors.dim}Install ${missingTool}:${colors.reset}`);
+      console.log(`  ${missingInstall}`);
+      console.log('');
+      console.log(`${colors.dim}Or use ${availableTool} directly:${colors.reset} ${availableCmd}`);
+      console.log('');
+      process.exit(1);
+    }
     
     // Clear screen and show splash
     console.clear();
@@ -242,10 +336,6 @@ export class SDKSession {
     console.log(fullWidthLine('═'));
     console.log('');
     
-    // Get tool versions
-    const claudeVersion = getToolVersion('claude');
-    const geminiVersion = getToolVersion('gemini');
-    
     // Banner with title and connected tools on the right side
     const bannerLines = AIC_BANNER.trim().split('\n');
     const titleLines = [
@@ -253,42 +343,46 @@ export class SDKSession {
       '',
       `${colors.dim}Connected Tools:${colors.reset}`,
       claudeVersion 
-        ? `${colors.green}✓${colors.reset} ${colors.brightCyan}Claude Code${colors.reset} ${colors.dim}v${claudeVersion}${colors.reset}`
-        : `${colors.red}✗${colors.reset} ${colors.dim}Claude Code (not found)${colors.reset}`,
+        ? `✅ ${colors.brightCyan}Claude Code${colors.reset} ${colors.dim}v${claudeVersion}${colors.reset}`
+        : `❌ ${colors.dim}Claude Code (not found)${colors.reset}`,
       geminiVersion
-        ? `${colors.green}✓${colors.reset} ${colors.brightMagenta}Gemini CLI${colors.reset} ${colors.dim}v${geminiVersion}${colors.reset}`
-        : `${colors.red}✗${colors.reset} ${colors.dim}Gemini CLI (not found)${colors.reset}`,
+        ? `✅ ${colors.brightMagenta}Gemini CLI${colors.reset} ${colors.dim}v${geminiVersion}${colors.reset}`
+        : `❌ ${colors.dim}Gemini CLI (not found)${colors.reset}`,
       '',
       `${colors.dim}📁 ${this.cwd}${colors.reset}`,
     ];
     
-    // Print banner and title side by side
+    // Print banner and title side by side, centered
     const maxLines = Math.max(bannerLines.length, titleLines.length);
+    const bannerWidth = 30; // Approximate width of banner
+    const gap = 10;
+    const maxTitleWidth = Math.max(...titleLines.map(l => stripAnsiLength(l)));
+    const totalContentWidth = bannerWidth + gap + maxTitleWidth;
+    const leftPadding = Math.max(2, Math.floor((width - totalContentWidth) / 2));
+    
     for (let i = 0; i < maxLines; i++) {
       const bannerLine = bannerLines[i] || '';
       const titleLine = titleLines[i] || '';
-      const bannerWidth = 30; // Approximate width of banner
-      const gap = 10;
-      console.log(`  ${bannerLine}${' '.repeat(Math.max(0, bannerWidth - stripAnsiLength(bannerLine) + gap))}${titleLine}`);
+      console.log(`${' '.repeat(leftPadding)}${bannerLine}${' '.repeat(Math.max(0, bannerWidth - stripAnsiLength(bannerLine) + gap))}${titleLine}`);
     }
     
     console.log('');
     console.log(fullWidthLine('─'));
     console.log('');
     
-    // Commands in a wider layout
+    // Commands in a wider layout (single slash = AIC commands, double slash = tool commands via interactive mode)
     const commandsLeft = [
-      `  ${colorize('//claude', colors.brightCyan)}       Switch to Claude Code`,
-      `  ${colorize('//gemini', colors.brightMagenta)}       Switch to Gemini CLI`,
-      `  ${colorize('//i', colors.brightYellow)}            Enter interactive mode`,
-      `  ${colorize('//forward', colors.brightGreen)}      Forward response ${colors.dim}[tool] [msg]${colors.reset}`,
+      `  ${rainbowText('/claude')}        Switch to Claude Code`,
+      `  ${rainbowText('/gemini', 1)}        Switch to Gemini CLI`,
+      `  ${rainbowText('/i', 2)}             Enter interactive mode`,
+      `  ${rainbowText('/forward', 3)}       Forward response ${colors.dim}[tool] [msg]${colors.reset}`,
     ];
     
     const commandsRight = [
-      `  ${colorize('//history', colors.blue)}      Show conversation`,
-      `  ${colorize('//status', colors.gray)}       Show running processes`,
-      `  ${colorize('//clear', colors.red)}        Clear sessions`,
-      `  ${colorize('//quit', colors.dim)}         Exit ${colors.dim}(or //cya)${colors.reset}`,
+      `  ${rainbowText('/history', 4)}       Show conversation`,
+      `  ${rainbowText('/status', 5)}        Show running processes`,
+      `  ${rainbowText('/clear', 0)}         Clear sessions`,
+      `  ${rainbowText('/quit', 1)}          Exit ${colors.dim}(or /cya)${colors.reset}`,
     ];
     
     // Print commands side by side if terminal is wide enough
@@ -307,11 +401,10 @@ export class SDKSession {
     }
     
     console.log('');
-    console.log(fullWidthLine('─'));
-    console.log('');
     
-    // Tips in a row
-    console.log(`  ${colors.dim}💡 ${colors.brightYellow}Tab${colors.dim}: autocomplete   ${colors.brightYellow}↑/↓${colors.dim}: history   ${colors.brightYellow}Ctrl+]${colors.dim}: detach interactive${colors.reset}`);
+    // Tips section
+    console.log(`  ${colors.dim}💡 ${colors.brightYellow}//command${colors.dim} opens interactive mode & sends the command. ${colors.white}Use ${colors.brightYellow}Ctrl+]${colors.white} to return to aic²${colors.reset}`);
+    console.log(`  ${colors.dim}💡 ${colors.brightYellow}Tab${colors.dim}: autocomplete   ${colors.brightYellow}↑/↓${colors.dim}: history${colors.reset}`);
     console.log('');
     
     // Show active tool with full width separator
@@ -333,10 +426,10 @@ export class SDKSession {
   }
 
   /**
-   * Tab completion for // commands
+   * Tab completion for / commands
    */
   private completer(line: string): CompleterResult {
-    const commands = ['//claude', '//gemini', '//i', '//forward', '//history', '//status', '//clear', '//quit', '//cya'];
+    const commands = ['/claude', '/gemini', '/i', '/forward', '/history', '/status', '/default', '/help', '/clear', '/quit', '/cya'];
     
     // Only complete if line starts with /
     if (line.startsWith('/')) {
@@ -392,13 +485,30 @@ export class SDKSession {
         }
       }
 
-      // Handle meta commands (double slash)
+      // Handle double slash - enter interactive mode and send the command
+      // e.g., //status -> enters interactive mode, sends /status, user stays in control
       if (trimmed.startsWith('//')) {
-        await this.handleMetaCommand(trimmed.slice(2));
+        const slashCmd = trimmed.slice(1); // e.g., "/status"
+        const toolName = this.activeTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
+        
+        // Show rainbow "Entering Interactive Mode" message
+        await animateRainbow(`Entering Interactive Mode for ${toolName}...`, 500);
+        process.stdout.write('\n');
+        
+        await this.enterInteractiveModeWithCommand(slashCmd);
         continue;
       }
 
-      // Send to active tool
+      // Handle AIC meta commands (single slash)
+      if (trimmed.startsWith('/')) {
+        // Animate the command with rainbow effect
+        await animateRainbow(trimmed, 400);
+        process.stdout.write('\n');
+        await this.handleMetaCommand(trimmed.slice(1));
+        continue;
+      }
+
+      // Send regular input to active tool
       await this.sendToTool(trimmed);
     }
   }
@@ -465,9 +575,61 @@ export class SDKSession {
         console.log('Sessions and history cleared.');
         break;
 
+      case 'default':
+        const toolArg = parts[1];
+        if (toolArg) {
+          // Set new default
+          const result = setDefaultTool(toolArg);
+          if (result.success) {
+            console.log(`${colors.green}✓${colors.reset} ${result.message}`);
+          } else {
+            console.log(`${colors.red}✗${colors.reset} ${result.message}`);
+          }
+        } else {
+          // Show current default
+          const currentDefault = getDefaultTool();
+          console.log(`${colors.dim}Current default tool:${colors.reset} ${colors.brightYellow}${currentDefault}${colors.reset}`);
+          console.log(`${colors.dim}Usage:${colors.reset} /default <claude|gemini>`);
+        }
+        break;
+
+      case 'help':
+      case '?':
+        this.showHelp();
+        break;
+
       default:
-        console.log(`Unknown command: //${command}`);
+        console.log(`${colors.red}✗${colors.reset} Unknown AIC command: ${colors.brightYellow}/${command}${colors.reset}`);
+        console.log(`${colors.dim}  Type ${colors.brightYellow}/help${colors.dim} to see available commands.${colors.reset}`);
+        console.log(`${colors.dim}  To send /${command} to the tool, use ${colors.brightYellow}//${command}${colors.reset}`);
     }
+  }
+
+  private showHelp(): void {
+    console.log('');
+    console.log(`${colors.brightCyan}A${colors.brightMagenta}I${colors.reset} ${colors.brightYellow}C${colors.white}ode${colors.reset} ${colors.brightYellow}C${colors.white}onnect${colors.reset}² ${colors.dim}- Commands${colors.reset}`);
+    console.log('');
+    console.log(`${colors.white}Session Commands:${colors.reset}`);
+    console.log(`  ${rainbowText('/claude')}        Switch to Claude Code`);
+    console.log(`  ${rainbowText('/gemini')}        Switch to Gemini CLI`);
+    console.log(`  ${rainbowText('/i')}             Enter interactive mode ${colors.dim}(Ctrl+] to detach)${colors.reset}`);
+    console.log(`  ${rainbowText('/forward')}       Forward last response ${colors.dim}[tool] [msg]${colors.reset}`);
+    console.log(`  ${rainbowText('/history')}       Show conversation history`);
+    console.log(`  ${rainbowText('/status')}        Show running processes`);
+    console.log(`  ${rainbowText('/default')}       Set default tool ${colors.dim}<claude|gemini>${colors.reset}`);
+    console.log(`  ${rainbowText('/clear')}         Clear sessions and history`);
+    console.log(`  ${rainbowText('/help')}          Show this help`);
+    console.log(`  ${rainbowText('/quit')}          Exit ${colors.dim}(or /cya)${colors.reset}`);
+    console.log('');
+    console.log(`${colors.white}Tool Commands:${colors.reset}`);
+    console.log(`  ${colors.brightYellow}//command${colors.reset}        Send /command to the active tool`);
+    console.log(`  ${colors.dim}                 Opens interactive mode, sends command, Ctrl+] to return${colors.reset}`);
+    console.log('');
+    console.log(`${colors.white}Tips:${colors.reset}`);
+    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Tab${colors.reset}            Autocomplete commands`);
+    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}↑/↓${colors.reset}            Navigate history`);
+    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Ctrl+]${colors.reset}         Detach from interactive mode`);
+    console.log('');
   }
 
   private async sendToTool(message: string): Promise<void> {
@@ -502,7 +664,7 @@ export class SDKSession {
 
   private sendToClaude(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const args: string[] = ['-p']; // Print mode
+      const args: string[] = ['-p']; // Print mode for regular messages
       
       // Continue session if we have one
       if (this.claudeHasSession) {
@@ -556,6 +718,7 @@ export class SDKSession {
       });
     });
   }
+
 
   private sendToGemini(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -728,7 +891,7 @@ export class SDKSession {
           }
           
           console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-          console.log(`${colors.dim}Use ${colors.brightYellow}//i${colors.dim} to re-attach • ${colors.brightGreen}//forward${colors.dim} to send to other tool${colors.reset}\n`);
+          console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
           resolve();
           return;
         }
@@ -750,6 +913,173 @@ export class SDKSession {
 
       // Cleanup function
       const cleanup = () => {
+        process.stdin.removeListener('data', onStdinData);
+        process.stdout.removeListener('resize', onResize);
+        outputDisposable.dispose();
+        
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+      };
+    });
+  }
+
+  /**
+   * Enter interactive mode and automatically send a slash command
+   * User stays in interactive mode to see output and interact, then Ctrl+] to return
+   */
+  private async enterInteractiveModeWithCommand(command: string): Promise<void> {
+    const toolName = this.activeTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
+    const toolColor = this.activeTool === 'claude' ? colors.brightCyan : colors.brightMagenta;
+    const toolCmd = this.activeTool;
+    
+    // Check if we already have a running process
+    let ptyProcess = this.runningProcesses.get(this.activeTool);
+    const isReattach = ptyProcess !== undefined;
+
+    console.log(`${colors.dim}Sending ${colors.brightYellow}${command}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} to return${colors.reset}\n`);
+    
+    // Clear the output buffer for fresh capture
+    this.interactiveOutputBuffer.set(this.activeTool, '');
+
+    return new Promise((resolve) => {
+      // Spawn new process if needed
+      if (!ptyProcess) {
+        const args: string[] = [];
+        
+        // Continue/resume session if we have history from print mode
+        if (this.activeTool === 'claude' && this.claudeHasSession) {
+          args.push('--continue');
+        } else if (this.activeTool === 'gemini' && this.geminiHasSession) {
+          args.push('--resume', 'latest');
+        }
+
+        ptyProcess = pty.spawn(toolCmd, args, {
+          name: 'xterm-256color',
+          cols: process.stdout.columns || 80,
+          rows: process.stdout.rows || 24,
+          cwd: this.cwd,
+          env: process.env as { [key: string]: string },
+        });
+
+        // Store the process
+        this.runningProcesses.set(this.activeTool, ptyProcess);
+
+        // Handle process exit (user typed /exit in the tool)
+        ptyProcess.onExit(({ exitCode }) => {
+          console.log(`\n${colors.dim}${toolName} exited (code ${exitCode})${colors.reset}`);
+          this.runningProcesses.delete(this.activeTool);
+          
+          // Mark session as having history
+          if (this.activeTool === 'claude') {
+            this.claudeHasSession = true;
+          } else {
+            this.geminiHasSession = true;
+          }
+        });
+      }
+
+      // Track if we've sent the command
+      let commandSent = false;
+
+      // Handle resize
+      const onResize = () => {
+        ptyProcess!.resize(
+          process.stdout.columns || 80,
+          process.stdout.rows || 24
+        );
+      };
+      process.stdout.on('resize', onResize);
+
+      // Function to send the command
+      const sendCommand = () => {
+        if (commandSent) return;
+        commandSent = true;
+        
+        // Type command character by character for reliability
+        let i = 0;
+        const fullCommand = command + '\r';
+        const typeNextChar = () => {
+          if (i < fullCommand.length) {
+            ptyProcess!.write(fullCommand[i]);
+            i++;
+            setTimeout(typeNextChar, 20);
+          }
+        };
+        typeNextChar();
+      };
+
+      // Pipe PTY output to terminal AND capture for forwarding
+      const outputDisposable = ptyProcess.onData((data) => {
+        process.stdout.write(data);
+        // Capture output for potential forwarding
+        const current = this.interactiveOutputBuffer.get(this.activeTool) || '';
+        this.interactiveOutputBuffer.set(this.activeTool, current + data);
+      });
+
+      // For reattach, send command quickly. For new process, wait for it to initialize.
+      const sendDelay = isReattach ? 100 : 2500;
+      const fallbackTimer = setTimeout(() => {
+        if (!commandSent) {
+          sendCommand();
+        }
+      }, sendDelay);
+
+      // Set up stdin forwarding with Ctrl+] detection
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+      }
+      process.stdin.resume();
+
+      let detached = false;
+
+      const onStdinData = (data: Buffer) => {
+        const str = data.toString();
+        
+        // Check for Ctrl+] (detach key)
+        if (str === DETACH_KEY) {
+          detached = true;
+          cleanup();
+          
+          // Save captured output to conversation history for forwarding
+          const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
+          if (capturedOutput) {
+            const cleanedOutput = stripAnsi(capturedOutput).trim();
+            if (cleanedOutput.length > 50) { // Only save meaningful output
+              this.conversationHistory.push({
+                tool: this.activeTool,
+                role: 'assistant',
+                content: cleanedOutput,
+              });
+            }
+            // Clear buffer after saving
+            this.interactiveOutputBuffer.set(this.activeTool, '');
+          }
+          
+          console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
+          console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+          resolve();
+          return;
+        }
+        
+        // Forward to PTY
+        ptyProcess!.write(str);
+      };
+      process.stdin.on('data', onStdinData);
+
+      // Handle process exit while attached
+      const exitHandler = () => {
+        if (!detached) {
+          cleanup();
+          console.log(`\n${colors.dim}Returned to ${colors.brightYellow}aic${colors.reset}\n`);
+          resolve();
+        }
+      };
+      ptyProcess.onExit(exitHandler);
+
+      // Cleanup function
+      const cleanup = () => {
+        clearTimeout(fallbackTimer);
         process.stdin.removeListener('data', onStdinData);
         process.stdout.removeListener('resize', onResize);
         outputDisposable.dispose();
@@ -808,7 +1138,7 @@ export class SDKSession {
       } else {
         // Multiple tools available - require explicit selection
         console.log(`${colors.yellow}Multiple tools available.${colors.reset} Please specify target:`);
-        console.log(`  ${colors.brightGreen}//forward${colors.reset} <${otherTools.join('|')}> [message]`);
+        console.log(`  ${colors.brightGreen}/forward${colors.reset} <${otherTools.join('|')}> [message]`);
         return;
       }
     }

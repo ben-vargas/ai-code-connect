@@ -88,3 +88,42 @@ export function saveConfig(config: Config): void {
   writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 
+/**
+ * Get the default tool (checks env var first, then config)
+ */
+export function getDefaultTool(): string {
+  // Environment variable takes priority
+  const envTool = process.env.AIC_DEFAULT_TOOL;
+  if (envTool && ['claude', 'gemini'].includes(envTool.toLowerCase())) {
+    return envTool.toLowerCase();
+  }
+  
+  // Fall back to config file
+  const config = loadConfig();
+  return config.defaultTool || 'claude';
+}
+
+/**
+ * Set the default tool and save to config
+ */
+export function setDefaultTool(tool: string): { success: boolean; message: string } {
+  const validTools = ['claude', 'gemini'];
+  const normalizedTool = tool.toLowerCase();
+  
+  if (!validTools.includes(normalizedTool)) {
+    return { 
+      success: false, 
+      message: `Invalid tool "${tool}". Valid options: ${validTools.join(', ')}` 
+    };
+  }
+  
+  const config = loadConfig();
+  config.defaultTool = normalizedTool;
+  saveConfig(config);
+  
+  return { 
+    success: true, 
+    message: `Default tool set to "${normalizedTool}". Will be used on next launch.` 
+  };
+}
+
