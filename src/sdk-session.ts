@@ -804,6 +804,9 @@ export class SDKSession {
     let ptyProcess = this.runningProcesses.get(this.activeTool);
     const isReattach = ptyProcess !== undefined;
 
+    // Pause readline to prevent interference with raw input
+    this.rl?.pause();
+
     if (isReattach) {
       console.log(`\n${colors.green}↩${colors.reset} Re-attaching to ${toolColor}${toolName}${colors.reset}...`);
     } else {
@@ -915,6 +918,13 @@ export class SDKSession {
         
         // Alternative: Double-Escape within 500ms to detach
         // This helps when Ctrl+] doesn't work (e.g., Gemini CLI)
+        
+        // Handle immediate double escape (received as one chunk)
+        if (str === '\x1b\x1b') {
+          performDetach();
+          return;
+        }
+
         if (str === '\x1b') { // Single Escape key
           const now = Date.now();
           if (now - lastEscapeTime < 500) {
@@ -952,6 +962,9 @@ export class SDKSession {
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
+        
+        // Resume readline
+        this.rl?.resume();
       };
     });
   }
@@ -968,6 +981,9 @@ export class SDKSession {
     // Check if we already have a running process
     let ptyProcess = this.runningProcesses.get(this.activeTool);
     const isReattach = ptyProcess !== undefined;
+
+    // Pause readline to prevent interference with raw input
+    this.rl?.pause();
 
     console.log(`${colors.dim}Sending ${colors.brightYellow}${command}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} to return${colors.reset}\n`);
     
@@ -1102,6 +1118,13 @@ export class SDKSession {
         
         // Alternative: Double-Escape within 500ms to detach
         // This helps when Ctrl+] doesn't work (e.g., Gemini CLI)
+        
+        // Handle immediate double escape (received as one chunk)
+        if (str === '\x1b\x1b') {
+          performDetach();
+          return;
+        }
+
         if (str === '\x1b') { // Single Escape key
           const now = Date.now();
           if (now - lastEscapeTime < 500) {
@@ -1140,6 +1163,9 @@ export class SDKSession {
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
+        
+        // Resume readline
+        this.rl?.resume();
       };
     });
   }

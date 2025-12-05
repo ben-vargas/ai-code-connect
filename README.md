@@ -248,6 +248,33 @@ npm run build
 aic
 ```
 
+## Testing
+
+AIC² uses [Vitest](https://vitest.dev/) for testing.
+
+```bash
+# Run tests once
+npm test
+
+# Run tests in watch mode (re-runs on file changes)
+npm run test:watch
+```
+
+### What's Tested
+
+| File | Tests | Description |
+|------|-------|-------------|
+| `src/utils.test.ts` | 17 | Pure utility functions: `stripAnsi`, `truncate`, `formatResponse` |
+| `src/config.test.ts` | 18 | Config loading, saving, defaults, environment variable handling |
+
+### Adding Tests
+
+Test files live alongside source files with a `.test.ts` suffix:
+- `src/utils.ts` → `src/utils.test.ts`
+- `src/config.ts` → `src/config.test.ts`
+
+Tests are excluded from the build output (`dist/`) but are committed to git.
+
 ## License
 
 MIT
