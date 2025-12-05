@@ -40,8 +40,39 @@ interface Message {
   content: string;
 }
 
-// Ctrl+] character code
-const DETACH_KEY = '\x1d'; // 0x1D = 29
+// Detach key codes - multiple options for compatibility across terminals
+// Traditional raw control characters (used by Terminal.app and others)
+const DETACH_KEYS = {
+  CTRL_BRACKET: 0x1d,      // Ctrl+] = 0x1D = 29
+  CTRL_BACKSLASH: 0x1c,    // Ctrl+\ = 0x1C = 28
+  CTRL_CARET: 0x1e,        // Ctrl+^ = 0x1E = 30 (Ctrl+Shift+6 on US keyboards)
+  CTRL_UNDERSCORE: 0x1f,   // Ctrl+_ = 0x1F = 31 (Ctrl+Shift+- on US keyboards)
+  ESCAPE: 0x1b,            // Escape = 0x1B = 27
+};
+
+// CSI u sequences - modern keyboard protocol used by iTerm2
+// Format: ESC [ <keycode> ; <modifiers> u
+// Modifier 5 = Ctrl (4) + 1
+const CSI_U_DETACH_SEQS = [
+  '\x1b[93;5u',   // Ctrl+] (keycode 93 = ])
+  '\x1b[92;5u',   // Ctrl+\ (keycode 92 = \)
+  '\x1b[54;5u',   // Ctrl+^ / Ctrl+6 (keycode 54 = 6)
+  '\x1b[45;5u',   // Ctrl+_ / Ctrl+- (keycode 45 = -)
+  '\x1b[54;6u',   // Ctrl+Shift+6 (modifier 6 = Ctrl+Shift)
+  '\x1b[45;6u',   // Ctrl+Shift+- (modifier 6 = Ctrl+Shift)
+];
+
+// Terminal sequences to filter out
+// Focus reporting - sent by terminals when window gains/loses focus
+const FOCUS_IN_SEQ = '\x1b[I';   // ESC [ I - Focus gained
+const FOCUS_OUT_SEQ = '\x1b[O';  // ESC [ O - Focus lost
+
+// Regex to match terminal response sequences we want to filter
+// These include Device Attributes responses, cursor position reports, etc.
+const TERMINAL_RESPONSE_REGEX = /\x1b\[\??[\d;]*[a-zA-Z]/g;
+
+// For backwards compatibility
+const DETACH_KEY = '\x1d';
 
 // Spinner frames
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -189,7 +220,7 @@ function getToolDisplayName(name: string): string {
 const AIC_COMMANDS = [
   { value: '/claude', name: `${rainbowText('/claude')}        Switch to Claude Code`, description: 'Switch to Claude Code' },
   { value: '/gemini', name: `${rainbowText('/gemini', 1)}        Switch to Gemini CLI`, description: 'Switch to Gemini CLI' },
-  { value: '/i', name: `${rainbowText('/i', 2)}             Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] to detach)' },
+  { value: '/i', name: `${rainbowText('/i', 2)}             Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] or Ctrl+\\ to detach)' },
   { value: '/forward', name: `${rainbowText('/forward', 3)}       Forward last response`, description: 'Forward response: /forward [tool] [msg]' },
   { value: '/fwd', name: `${rainbowText('/fwd', 4)}            Forward (alias)`, description: 'Forward response: /fwd [tool] [msg]' },
   { value: '/history', name: `${rainbowText('/history', 4)}       Show conversation`, description: 'Show conversation history' },
@@ -230,6 +261,8 @@ class Spinner {
 
   start(): void {
     this.frameIndex = 0;
+    // Clear any garbage on the current line before starting spinner
+    process.stdout.write('\x1b[2K\r');
     process.stdout.write(`\n${SPINNER_FRAMES[0]} ${this.message}...`);
     
     this.intervalId = setInterval(() => {
@@ -404,7 +437,7 @@ export class SDKSession {
     console.log('');
     
     // Tips section
-    console.log(`  ${colors.dim}💡 ${colors.brightYellow}//command${colors.dim} opens interactive mode & sends the command. ${colors.white}Use ${colors.brightYellow}Ctrl+]${colors.white} or ${colors.brightYellow}Esc Esc${colors.white} to return to aic²${colors.reset}`);
+    console.log(`  ${colors.dim}💡 ${colors.brightYellow}//command${colors.dim} opens interactive mode & sends the command. ${colors.white}Use ${colors.brightYellow}Ctrl+]${colors.white}, ${colors.brightYellow}Ctrl+\\${colors.white}, or ${colors.brightYellow}Esc Esc${colors.white} to return to aic²${colors.reset}`);
     console.log(`  ${colors.dim}💡 ${colors.brightYellow}Tab${colors.dim}: autocomplete   ${colors.brightYellow}↑/↓${colors.dim}: history${colors.reset}`);
     console.log('');
     
@@ -502,17 +535,7 @@ export class SDKSession {
 
       // Handle AIC meta commands (single slash)
       if (trimmed.startsWith('/')) {
-        // Split command from arguments
-        const spaceIndex = trimmed.indexOf(' ');
-        const command = spaceIndex > 0 ? trimmed.slice(0, spaceIndex) : trimmed;
-        const args = spaceIndex > 0 ? trimmed.slice(spaceIndex) : '';
-        
-        // Animate only the command with rainbow, show args in yellow
-        await animateRainbow(command, 400);
-        if (args) {
-          process.stdout.write(`${colors.brightYellow}${args}${colors.reset}`);
-        }
-        process.stdout.write('\n');
+        // Readline already echoed the command - just process it, no extra output
         await this.handleMetaCommand(trimmed.slice(1));
         continue;
       }
@@ -528,9 +551,37 @@ export class SDKSession {
       this.rl?.setPrompt(this.getPrompt());
       this.rl?.prompt();
       
-      this.rl?.once('line', (line) => {
-        resolve(line);
-      });
+      const lineHandler = (line: string) => {
+        // Filter out terminal garbage that may have leaked into the input
+        let cleaned = line
+          .replace(/\x1b\[I/g, '')
+          .replace(/\x1b\[O/g, '')
+          .replace(/\^\[\[I/g, '')
+          .replace(/\^\[\[O/g, '')
+          .replace(/\x1b\[[\d;]*[a-zA-Z]/g, '');
+          
+        // AGGRESSIVE STRIP: Remove Device Attribute response suffixes
+        // e.g. "/cya;1;2;...;52c" -> "/cya"
+        // Pattern: semicolon followed by numbers/semicolons ending in c at the end of string
+        cleaned = cleaned.replace(/;[\d;]+c$/, '');
+        
+        // Also strip if it's just the garbage on its own line
+        cleaned = cleaned.replace(/^\d*u?[\d;]+c$/, '');
+        
+        cleaned = cleaned.trim();
+          
+        // If the line was ONLY garbage (and now empty), ignore it
+        if (line.length > 0 && cleaned.length === 0) {
+          this.rl?.prompt();
+          return;
+        }
+        
+        // Valid input
+        this.rl?.removeListener('line', lineHandler);
+        resolve(cleaned);
+      };
+      
+      this.rl?.on('line', lineHandler);
     });
   }
 
@@ -622,7 +673,7 @@ export class SDKSession {
     console.log(`${colors.white}Session Commands:${colors.reset}`);
     console.log(`  ${rainbowText('/claude')}        Switch to Claude Code`);
     console.log(`  ${rainbowText('/gemini')}        Switch to Gemini CLI`);
-    console.log(`  ${rainbowText('/i')}             Enter interactive mode ${colors.dim}(Ctrl+] to detach)${colors.reset}`);
+    console.log(`  ${rainbowText('/i')}             Enter interactive mode ${colors.dim}(Ctrl+] or Ctrl+\\ to detach)${colors.reset}`);
     console.log(`  ${rainbowText('/forward')}       Forward last response ${colors.dim}[tool] [msg]${colors.reset}`);
     console.log(`  ${rainbowText('/history')}       Show conversation history`);
     console.log(`  ${rainbowText('/status')}        Show running processes`);
@@ -633,13 +684,13 @@ export class SDKSession {
     console.log('');
     console.log(`${colors.white}Tool Commands:${colors.reset}`);
     console.log(`  ${colors.brightYellow}//command${colors.reset}        Send /command to the active tool`);
-    console.log(`  ${colors.dim}                 Opens interactive mode, sends command, Ctrl+] to return${colors.reset}`);
+    console.log(`  ${colors.dim}                 Opens interactive mode, sends command, Ctrl+] or Ctrl+\\ to return${colors.reset}`);
     console.log('');
     console.log(`${colors.white}Tips:${colors.reset}`);
     console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Tab${colors.reset}            Autocomplete commands`);
     console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}↑/↓${colors.reset}            Navigate history`);
-    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Ctrl+]${colors.reset}         Detach from interactive mode`);
-    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Esc Esc${colors.reset}        Detach (alternative, press Escape twice quickly)`);
+    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Ctrl+]${colors.reset}, ${colors.brightYellow}Ctrl+\\${colors.reset}, ${colors.brightYellow}Ctrl+^${colors.reset}, or ${colors.brightYellow}Ctrl+_${colors.reset}  Detach from interactive mode`);
+    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Esc Esc${colors.reset}        Detach (press Escape twice quickly)`);
     console.log('');
   }
 
@@ -812,7 +863,7 @@ export class SDKSession {
     } else {
       console.log(`\n${colors.green}▶${colors.reset} Starting ${toolColor}${toolName}${colors.reset} interactive mode...`);
     }
-    console.log(`${colors.dim}Press ${colors.brightYellow}Ctrl+]${colors.dim} to detach • ${colors.white}/exit${colors.dim} to terminate${colors.reset}\n`);
+    console.log(`${colors.dim}Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to detach • ${colors.white}/exit${colors.dim} to terminate${colors.reset}\n`);
     
     // Clear the output buffer for fresh capture
     this.interactiveOutputBuffer.set(this.activeTool, '');
@@ -867,13 +918,22 @@ export class SDKSession {
 
       // Pipe PTY output to terminal AND capture for forwarding
       const outputDisposable = ptyProcess.onData((data) => {
-        process.stdout.write(data);
+        // Filter out terminal response sequences (DA responses, etc.)
+        // These can cause garbage like "0u64;1;2;4;6;..." to appear
+        let filteredData = data;
+        
+        // Filter focus sequences from output too
+        filteredData = filteredData.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
+        
+        if (filteredData.length > 0) {
+          process.stdout.write(filteredData);
+        }
         // Capture output for potential forwarding
         const current = this.interactiveOutputBuffer.get(this.activeTool) || '';
         this.interactiveOutputBuffer.set(this.activeTool, current + data);
       });
 
-      // Set up stdin forwarding with Ctrl+] detection (or double-Escape as fallback)
+      // Set up stdin forwarding with detach key detection
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
@@ -902,43 +962,115 @@ export class SDKSession {
           this.interactiveOutputBuffer.set(this.activeTool, '');
         }
         
+        // Clear any pending terminal responses before showing detach message
+        process.stdout.write('\x1b[2K\r'); // Clear current line
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
         console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
         resolve();
       };
 
+      // Debug mode - set AIC_DEBUG=1 to see key codes
+      const debugKeys = process.env.AIC_DEBUG === '1';
+
       const onStdinData = (data: Buffer) => {
-        const str = data.toString();
+        let str = data.toString();
         
-        // Check for Ctrl+] (detach key) - check if included anywhere in buffer
-        if (str.includes(DETACH_KEY)) {
-          performDetach();
-          return;
+        // Debug output to see what keys are being received
+        if (debugKeys) {
+          const hexBytes = Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+          console.log(`\n[DEBUG] Received ${data.length} bytes: ${hexBytes}`);
         }
         
-        // Alternative: Double-Escape within 500ms to detach
-        // This helps when Ctrl+] doesn't work (e.g., Gemini CLI)
+        // Filter out terminal focus reporting sequences (sent when window gains/loses focus)
+        // These cause ^[[I and ^[[O to appear in the terminal
+        if (str === FOCUS_IN_SEQ || str === FOCUS_OUT_SEQ) {
+          if (debugKeys) console.log('[DEBUG] Filtered focus event');
+          return; // Don't forward to PTY
+        }
         
-        // Handle immediate double escape (received as one chunk)
-        if (str === '\x1b\x1b') {
-          performDetach();
-          return;
+        // Also filter if focus sequences are embedded in the data
+        str = str.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
+        if (str.length === 0) {
+          return; // Nothing left after filtering
+        }
+        
+        // Check for CSI u sequences (modern keyboard protocol used by iTerm2)
+        for (const seq of CSI_U_DETACH_SEQS) {
+          if (str === seq || str.includes(seq)) {
+            if (debugKeys) console.log(`[DEBUG] Detected CSI u detach sequence: ${seq.replace('\x1b', 'ESC')}`);
+            performDetach();
+            return;
+          }
+        }
+        
+        // Check for detach keys by examining raw bytes (traditional terminals)
+        // This is more reliable than string comparison for control characters
+        for (let i = 0; i < data.length; i++) {
+          const byte = data[i];
+          
+          // Ctrl+] (0x1D = 29) - primary detach key
+          if (byte === DETACH_KEYS.CTRL_BRACKET) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+]');
+            performDetach();
+            return;
+          }
+          
+          // Ctrl+\ (0x1C = 28) - alternative detach key
+          if (byte === DETACH_KEYS.CTRL_BACKSLASH) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+\\');
+            performDetach();
+            return;
+          }
+          
+          // Ctrl+^ (0x1E = 30) - another alternative (Ctrl+Shift+6)
+          if (byte === DETACH_KEYS.CTRL_CARET) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+^');
+            performDetach();
+            return;
+          }
+          
+          // Ctrl+_ (0x1F = 31) - another alternative (Ctrl+Shift+-)
+          if (byte === DETACH_KEYS.CTRL_UNDERSCORE) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+_');
+            performDetach();
+            return;
+          }
+        }
+        
+        // Handle escape sequences for double-escape detection
+        // Check for immediate double escape (0x1B 0x1B) anywhere in buffer
+        if (data.length >= 2) {
+          for (let i = 0; i < data.length - 1; i++) {
+            if (data[i] === DETACH_KEYS.ESCAPE && data[i + 1] === DETACH_KEYS.ESCAPE) {
+              if (debugKeys) console.log('[DEBUG] Detected double-Escape');
+              performDetach();
+              return;
+            }
+          }
         }
 
-        if (str === '\x1b') { // Single Escape key
+        // Single Escape (0x1B) - track for double-escape detection
+        const isSingleEscape = data.length === 1 && data[0] === DETACH_KEYS.ESCAPE;
+        if (isSingleEscape) {
           const now = Date.now();
           if (now - lastEscapeTime < 500) {
             // Double escape detected - detach!
+            if (debugKeys) console.log('[DEBUG] Detected double-Escape (timed)');
             performDetach();
             return;
           }
           lastEscapeTime = now;
-        } else {
-          // Reset escape timer if any other key pressed
+          // Still forward the escape to the PTY
+          ptyProcess!.write(str);
+          return;
+        }
+        
+        // Reset escape timer if not an escape key
+        if (!isSingleEscape) {
           lastEscapeTime = 0;
         }
         
-        // Forward to PTY
+        // Forward filtered data to PTY
         ptyProcess!.write(str);
       };
       process.stdin.on('data', onStdinData);
@@ -959,12 +1091,23 @@ export class SDKSession {
         process.stdout.removeListener('resize', onResize);
         outputDisposable.dispose();
         
+        // Clear the current line
+        process.stdout.write('\x1b[2K\r');
+        
+        // CRITICAL FIX: Explicitly disable terminal features that cause garbage
+        process.stdout.write('\x1b[?1004l'); // Disable focus reporting (stops ^[[I / ^[[O)
+        process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
+        
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
         
-        // Resume readline
+        // Resume readline immediately
         this.rl?.resume();
+        
+        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+        resolve();
       };
     });
   }
@@ -985,7 +1128,7 @@ export class SDKSession {
     // Pause readline to prevent interference with raw input
     this.rl?.pause();
 
-    console.log(`${colors.dim}Sending ${colors.brightYellow}${command}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} to return${colors.reset}\n`);
+    console.log(`${colors.dim}Sending ${colors.brightYellow}${command}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return${colors.reset}\n`);
     
     // Clear the output buffer for fresh capture
     this.interactiveOutputBuffer.set(this.activeTool, '');
@@ -1059,7 +1202,16 @@ export class SDKSession {
 
       // Pipe PTY output to terminal AND capture for forwarding
       const outputDisposable = ptyProcess.onData((data) => {
-        process.stdout.write(data);
+        // Filter out terminal response sequences (DA responses, etc.)
+        // These can cause garbage like "0u64;1;2;4;6;..." to appear
+        let filteredData = data;
+        
+        // Filter focus sequences from output too
+        filteredData = filteredData.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
+        
+        if (filteredData.length > 0) {
+          process.stdout.write(filteredData);
+        }
         // Capture output for potential forwarding
         const current = this.interactiveOutputBuffer.get(this.activeTool) || '';
         this.interactiveOutputBuffer.set(this.activeTool, current + data);
@@ -1073,7 +1225,7 @@ export class SDKSession {
         }
       }, sendDelay);
 
-      // Set up stdin forwarding with Ctrl+] detection (or double-Escape as fallback)
+      // Set up stdin forwarding with detach key detection
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
@@ -1081,6 +1233,9 @@ export class SDKSession {
 
       let detached = false;
       let lastEscapeTime = 0;
+      
+      // Debug mode - set AIC_DEBUG=1 to see key codes
+      const debugKeys = process.env.AIC_DEBUG === '1';
 
       const performDetach = () => {
         if (detached) return;
@@ -1102,43 +1257,112 @@ export class SDKSession {
           this.interactiveOutputBuffer.set(this.activeTool, '');
         }
         
+        // Clear any pending terminal responses before showing detach message
+        process.stdout.write('\x1b[2K\r'); // Clear current line
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
         console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
         resolve();
       };
 
       const onStdinData = (data: Buffer) => {
-        const str = data.toString();
+        let str = data.toString();
         
-        // Check for Ctrl+] (detach key) - check if included anywhere in buffer
-        if (str.includes(DETACH_KEY)) {
-          performDetach();
-          return;
+        // Debug output to see what keys are being received
+        if (debugKeys) {
+          const hexBytes = Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+          console.log(`\n[DEBUG] Received ${data.length} bytes: ${hexBytes}`);
         }
         
-        // Alternative: Double-Escape within 500ms to detach
-        // This helps when Ctrl+] doesn't work (e.g., Gemini CLI)
+        // Filter out terminal focus reporting sequences (sent when window gains/loses focus)
+        // These cause ^[[I and ^[[O to appear in the terminal
+        if (str === FOCUS_IN_SEQ || str === FOCUS_OUT_SEQ) {
+          if (debugKeys) console.log('[DEBUG] Filtered focus event');
+          return; // Don't forward to PTY
+        }
         
-        // Handle immediate double escape (received as one chunk)
-        if (str === '\x1b\x1b') {
-          performDetach();
-          return;
+        // Also filter if focus sequences are embedded in the data
+        str = str.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
+        if (str.length === 0) {
+          return; // Nothing left after filtering
+        }
+        
+        // Check for CSI u sequences (modern keyboard protocol used by iTerm2)
+        for (const seq of CSI_U_DETACH_SEQS) {
+          if (str === seq || str.includes(seq)) {
+            if (debugKeys) console.log(`[DEBUG] Detected CSI u detach sequence: ${seq.replace('\x1b', 'ESC')}`);
+            performDetach();
+            return;
+          }
+        }
+        
+        // Check for detach keys by examining raw bytes (traditional terminals)
+        // This is more reliable than string comparison for control characters
+        for (let i = 0; i < data.length; i++) {
+          const byte = data[i];
+          
+          // Ctrl+] (0x1D = 29) - primary detach key
+          if (byte === DETACH_KEYS.CTRL_BRACKET) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+]');
+            performDetach();
+            return;
+          }
+          
+          // Ctrl+\ (0x1C = 28) - alternative detach key
+          if (byte === DETACH_KEYS.CTRL_BACKSLASH) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+\\');
+            performDetach();
+            return;
+          }
+          
+          // Ctrl+^ (0x1E = 30) - another alternative (Ctrl+Shift+6)
+          if (byte === DETACH_KEYS.CTRL_CARET) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+^');
+            performDetach();
+            return;
+          }
+          
+          // Ctrl+_ (0x1F = 31) - another alternative (Ctrl+Shift+-)
+          if (byte === DETACH_KEYS.CTRL_UNDERSCORE) {
+            if (debugKeys) console.log('[DEBUG] Detected Ctrl+_');
+            performDetach();
+            return;
+          }
+        }
+        
+        // Handle escape sequences for double-escape detection
+        // Check for immediate double escape (0x1B 0x1B) anywhere in buffer
+        if (data.length >= 2) {
+          for (let i = 0; i < data.length - 1; i++) {
+            if (data[i] === DETACH_KEYS.ESCAPE && data[i + 1] === DETACH_KEYS.ESCAPE) {
+              if (debugKeys) console.log('[DEBUG] Detected double-Escape');
+              performDetach();
+              return;
+            }
+          }
         }
 
-        if (str === '\x1b') { // Single Escape key
+        // Single Escape (0x1B) - track for double-escape detection
+        const isSingleEscape = data.length === 1 && data[0] === DETACH_KEYS.ESCAPE;
+        if (isSingleEscape) {
           const now = Date.now();
           if (now - lastEscapeTime < 500) {
             // Double escape detected - detach!
+            if (debugKeys) console.log('[DEBUG] Detected double-Escape (timed)');
             performDetach();
             return;
           }
           lastEscapeTime = now;
-        } else {
-          // Reset escape timer if any other key pressed
+          // Still forward the escape to the PTY
+          ptyProcess!.write(str);
+          return;
+        }
+        
+        // Reset escape timer if not an escape key
+        if (!isSingleEscape) {
           lastEscapeTime = 0;
         }
         
-        // Forward to PTY
+        // Forward filtered data to PTY
         ptyProcess!.write(str);
       };
       process.stdin.on('data', onStdinData);
@@ -1160,12 +1384,37 @@ export class SDKSession {
         process.stdout.removeListener('resize', onResize);
         outputDisposable.dispose();
         
+        // Clear the current line
+        process.stdout.write('\x1b[2K\r');
+        
+        // Explicitly disable terminal features that cause garbage
+        process.stdout.write('\x1b[?1004l'); // Disable focus reporting
+        process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
+        
+        // Save captured output to conversation history
+        const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
+        if (capturedOutput) {
+          const cleanedOutput = stripAnsi(capturedOutput).trim();
+          if (cleanedOutput.length > 50) { 
+            this.conversationHistory.push({
+              tool: this.activeTool,
+              role: 'assistant',
+              content: cleanedOutput,
+            });
+          }
+          this.interactiveOutputBuffer.set(this.activeTool, '');
+        }
+        
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
         
-        // Resume readline
+        // Resume readline immediately - safest approach
         this.rl?.resume();
+        
+        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+        resolve();
       };
     });
   }
