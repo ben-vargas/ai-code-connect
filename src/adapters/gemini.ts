@@ -86,6 +86,7 @@ export class GeminiAdapter implements ToolAdapter {
     // Remove Gemini UI-specific lines
     output = output.replace(/^\s*Using:.*MCP servers?\s*$/gm, '');
     output = output.replace(/^\s*~\/.*\(main\*?\).*$/gm, ''); // Directory status line
+    output = output.replace(/^\s*~\/[^\n]*$/gm, ''); // Any directory path line
     output = output.replace(/^\s*no sandbox.*$/gim, '');
     output = output.replace(/^\s*auto\s*$/gm, '');
     output = output.replace(/^\s*Reading.*\(esc to cancel.*\)\s*$/gm, '');
@@ -94,50 +95,70 @@ export class GeminiAdapter implements ToolAdapter {
     output = output.replace(/^\s*\?\s*for shortcuts\s*$/gm, '');
     output = output.replace(/^\s*Try ".*"\s*$/gm, ''); // Suggestion lines
 
+    // Remove thinking/incubating indicators
+    output = output.replace(/^\s*∴ Thought for.*$/gm, '');
+    output = output.replace(/^\s*✽ Incubating.*$/gm, '');
+    output = output.replace(/\(ctrl\+o to show thinking\)/gi, '');
+    output = output.replace(/\(esc to interrupt\)/gi, '');
+    output = output.replace(/\(esc to cancel.*\)/gi, '');
+
     // Remove tool status lines (✓ ReadFolder, ✓ ReadFile, etc.)
     output = output.replace(/^\s*[✓✗]\s+\w+.*$/gm, '');
 
     // Remove the prompt character
     output = output.replace(/^>\s*$/gm, '');
 
-    // Extract just the response content - look for ✦ markers (Gemini's response indicator)
-    // and extract the text that follows
-    const responseBlocks: string[] = [];
-    const lines = output.split('\n');
-    let inResponse = false;
-    let currentBlock: string[] = [];
+    // Remove "... generating more ..." markers
+    output = output.replace(/\.\.\.\s*generating more\s*\.\.\./gi, '');
 
-    for (const line of lines) {
-      const trimmed = line.trim();
+    // GEMINI-SPECIFIC: Gemini streams code progressively with status indicators.
+    // Each indicator is followed by a progressively more complete code block.
+    // Unlike Claude (which streams text progressively), Gemini REDRAWS from the beginning.
+    // We need to find the LAST occurrence and keep only that final complete block.
+    const streamingPatterns = [
+      /Defining the Response Strategy/gi,
+      /Formulating\s+\w+\s+Code/gi,
+      /Formulating\s+\w+\s+Response/gi,
+      /Considering\s+the\s+Response\s+Format/gi,
+      /Presenting\s+the\s+Code/gi,
+      /Presenting\s+the\s+Response/gi,
+      /Providing\s+\w+\s+Code\s+Example/gi,
+      /Generating\s+\w+\s+Code/gi,
+      /Writing\s+the\s+Code/gi,
+    ];
 
-      // Start of a response block
-      if (trimmed.startsWith('✦')) {
-        if (currentBlock.length > 0) {
-          responseBlocks.push(currentBlock.join('\n'));
+    // Find the position after the LAST streaming indicator
+    let lastIndicatorEnd = 0;
+    for (const pattern of streamingPatterns) {
+      const regex = new RegExp(pattern.source, 'gi');
+      let match;
+      while ((match = regex.exec(output)) !== null) {
+        const endPos = match.index + match[0].length;
+        if (endPos > lastIndicatorEnd) {
+          lastIndicatorEnd = endPos;
         }
-        currentBlock = [trimmed.replace(/^✦\s*/, '')];
-        inResponse = true;
-      } else if (inResponse && trimmed.length > 0) {
-        // Continue capturing response content
-        // Skip empty lines and UI garbage
-        if (!trimmed.match(/^[\s│─╭╮╰╯]*$/) && trimmed.length > 2) {
-          currentBlock.push(line);
-        }
-      } else if (trimmed.length === 0 && inResponse) {
-        // Empty line in response - keep it for formatting
-        currentBlock.push('');
       }
     }
 
-    // Don't forget the last block
-    if (currentBlock.length > 0) {
-      responseBlocks.push(currentBlock.join('\n'));
+    // If we found streaming indicators, take only content after the last one
+    if (lastIndicatorEnd > 0) {
+      output = output.substring(lastIndicatorEnd).trim();
+    } else {
+      // Fallback: try the ✦ marker
+      const lastMarkerIndex = output.lastIndexOf('✦');
+      if (lastMarkerIndex >= 0) {
+        output = output.substring(lastMarkerIndex + 1).trim();
+      }
     }
 
-    // If we found response blocks, use those; otherwise fall back to cleaned output
-    if (responseBlocks.length > 0) {
-      output = responseBlocks.join('\n\n');
-    }
+    // Clean up any remaining line-based garbage
+    const cleanedLines = output.split('\n').filter(line => {
+      const trimmed = line.trim();
+      // Skip empty UI elements
+      if (trimmed.match(/^[\s│─╭╮╰╯]*$/) && trimmed.length < 3) return false;
+      return true;
+    });
+    output = cleanedLines.join('\n');
 
     // Final cleanup
     output = output.replace(/\n{3,}/g, '\n\n');

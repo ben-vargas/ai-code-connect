@@ -1,6 +1,12 @@
 import * as pty from 'node-pty';
 import { IPty } from 'node-pty';
+import xtermHeadless from '@xterm/headless';
+import serializeAddonPkg from '@xterm/addon-serialize';
 import { stripAnsi } from './utils.js';
+
+// ESM/CJS compatibility
+const { Terminal } = xtermHeadless;
+const { SerializeAddon } = serializeAddonPkg;
 
 /**
  * State machine for persistent PTY lifecycle
@@ -76,6 +82,11 @@ export class PersistentPtyManager {
   private callbacks: PtyCallbacks = {};
   private cwd: string = process.cwd();
 
+  // Headless terminal for proper screen state tracking
+  // This handles cursor positioning, screen clears, etc. properly
+  private headlessTerminal: InstanceType<typeof Terminal> | null = null;
+  private serializeAddon: InstanceType<typeof SerializeAddon> | null = null;
+
   // For attach/detach
   private isAttached: boolean = false;
   private attachedOutputHandler: ((data: string) => void) | null = null;
@@ -89,6 +100,21 @@ export class PersistentPtyManager {
   private suppressExitMessage: boolean = false;
 
   constructor(private config: PtyConfig) {}
+
+  /**
+   * Initialize the headless terminal for screen state tracking.
+   * This is used to properly capture output when tools use cursor positioning
+   * to redraw content (like Gemini's streaming).
+   */
+  private initHeadlessTerminal(): void {
+    this.headlessTerminal = new Terminal({
+      cols: process.stdout.columns || 80,
+      rows: process.stdout.rows || 24,
+      scrollback: 1000, // Keep scrollback for longer responses
+    });
+    this.serializeAddon = new SerializeAddon();
+    this.headlessTerminal.loadAddon(this.serializeAddon);
+  }
 
   /**
    * Get current state
@@ -120,9 +146,65 @@ export class PersistentPtyManager {
 
   /**
    * Get the output buffer (for reattach screen restore)
+   * Uses the headless terminal to get the actual visible screen content.
    */
   getOutputBuffer(): string {
+    // If we have a headless terminal, extract visible text from the screen
+    // This correctly handles cursor positioning and screen redraws
+    if (this.headlessTerminal) {
+      try {
+        const buffer = this.headlessTerminal.buffer.active;
+        const lines: string[] = [];
+
+        // Only read the VISIBLE viewport, not the scrollback
+        // This avoids capturing intermediate streaming frames
+        const viewportStart = buffer.baseY;
+        const viewportEnd = viewportStart + this.headlessTerminal.rows;
+
+        for (let y = viewportStart; y < viewportEnd && y < buffer.length; y++) {
+          const line = buffer.getLine(y);
+          if (line) {
+            // translateToString(true) = trim trailing whitespace
+            lines.push(line.translateToString(true));
+          }
+        }
+
+        // Join lines and trim empty lines from start/end
+        let text = lines.join('\n').trim();
+
+        // If viewport is mostly empty (just prompt), try getting more from scrollback
+        if (text.length < 50 && buffer.length > viewportEnd) {
+          // Get the last screenful from scrollback instead
+          const scrollbackLines: string[] = [];
+          const startY = Math.max(0, buffer.length - this.headlessTerminal.rows * 2);
+          for (let y = startY; y < buffer.length; y++) {
+            const line = buffer.getLine(y);
+            if (line) {
+              scrollbackLines.push(line.translateToString(true));
+            }
+          }
+          text = scrollbackLines.join('\n').trim();
+        }
+
+        if (text.length > 0) {
+          return text;
+        }
+      } catch {
+        // Fall back to raw buffer if extraction fails
+      }
+    }
     return this.outputBuffer;
+  }
+
+  /**
+   * Clear the output buffer (used after sending a prompt to avoid capturing the typed input)
+   */
+  clearOutputBuffer(): void {
+    this.outputBuffer = '';
+    // Also reset the headless terminal
+    if (this.headlessTerminal) {
+      this.headlessTerminal.reset();
+    }
   }
 
   /**
@@ -146,6 +228,9 @@ export class PersistentPtyManager {
     this.state = PtyState.SPAWNING;
     this.outputBuffer = '';
     this.isReady = false;
+
+    // Initialize headless terminal for screen state tracking
+    this.initHeadlessTerminal();
 
     // Create a promise that resolves when we see the first prompt OR after short timeout
     this.readyPromise = new Promise<void>((resolve) => {
@@ -182,11 +267,14 @@ export class PersistentPtyManager {
 
     // Handle resize
     const onResize = () => {
+      const cols = process.stdout.columns || 80;
+      const rows = process.stdout.rows || 24;
       if (this.pty) {
-        this.pty.resize(
-          process.stdout.columns || 80,
-          process.stdout.rows || 24
-        );
+        this.pty.resize(cols, rows);
+      }
+      // Also resize the headless terminal to match
+      if (this.headlessTerminal) {
+        this.headlessTerminal.resize(cols, rows);
       }
     };
     process.stdout.on('resize', onResize);
@@ -208,8 +296,14 @@ export class PersistentPtyManager {
       this.outputBuffer = '';
     }
 
-    // Add to buffer
+    // Add to buffer (raw, kept for backwards compatibility)
     this.outputBuffer += data;
+
+    // Also write to headless terminal for proper screen state tracking
+    // This correctly handles cursor positioning, screen redraws, etc.
+    if (this.headlessTerminal) {
+      this.headlessTerminal.write(data);
+    }
 
     // Limit buffer size (keep last 100KB)
     const MAX_BUFFER = 100 * 1024;
@@ -466,6 +560,12 @@ export class PersistentPtyManager {
     if (this.pty) {
       this.pty.kill();
       this.pty = null;
+    }
+    // Dispose headless terminal
+    if (this.headlessTerminal) {
+      this.headlessTerminal.dispose();
+      this.headlessTerminal = null;
+      this.serializeAddon = null;
     }
     this.setState(PtyState.DEAD);
   }

@@ -139,6 +139,19 @@ export class ClaudeAdapter implements ToolAdapter {
     output = output.replace(/^\s*\?\s*for shortcuts\s*$/gm, '');
     output = output.replace(/^\s*Try ".*"\s*$/gm, '');
 
+    // Remove typing hints and keyboard shortcuts help
+    output = output.replace(/You can also use Ctrl\+P.*history.*$/gm, '');
+    output = output.replace(/\(esc to cancel.*\)/g, '');
+    output = output.replace(/^\s*no sandbox.*$/gm, '');
+    output = output.replace(/^\s*auto\s*$/gm, '');
+
+    // Remove welcome screen elements
+    output = output.replace(/^\s*Welcome back!\s*$/gm, '');
+    output = output.replace(/^\s*Tips for getting started\s*$/gm, '');
+    output = output.replace(/^\s*Run \/init.*$/gm, '');
+    output = output.replace(/^\s*Recent activity\s*$/gm, '');
+    output = output.replace(/^\s*No recent activity\s*$/gm, '');
+
     // Remove tool use indicators (⏺ Read, ⏺ Write, etc.) but keep content
     output = output.replace(/^⏺\s+(Read|Write|Edit|Bash|Glob|Grep)\(.*\)\s*$/gm, '');
     output = output.replace(/^\s*⎿\s+.*$/gm, ''); // Tool result indicators

@@ -999,52 +999,6 @@ export class SDKSession {
   }
 
   /**
-   * Enter interactive mode and automatically send a prompt
-   * Used for /forwardi to forward a message and stay in interactive mode
-   */
-  private async enterInteractiveModeWithPrompt(prompt: string): Promise<void> {
-    const adapter = this.registry.get(this.activeTool);
-    const toolName = adapter?.displayName || this.activeTool;
-    const toolColor = adapter?.color || colors.white;
-
-    // Check if manager exists BEFORE getting (to detect new spawn vs reattach)
-    const existingManager = this.ptyManagers.get(this.activeTool);
-    const isReattach = existingManager !== undefined && !existingManager.isDead();
-
-    // Get or create the persistent PTY manager (don't wait - user sees startup)
-    const manager = await this.getOrCreateManager(this.activeTool, false);
-
-    // Close readline completely to prevent interference with raw input
-    this.rl?.close();
-    this.rl = null;
-
-    console.log(`${colors.dim}Sending prompt... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return when done${colors.reset}\n`);
-
-    // Mark as attached
-    manager.attach();
-
-    // For reattach, send quickly. For new process, use adapter's startup delay.
-    const sendDelay = isReattach ? 100 : (adapter?.startupDelay || 2500);
-
-    // Send prompt after appropriate delay, typing char by char for reliability
-    setTimeout(() => {
-      let i = 0;
-      const fullPrompt = prompt + '\r';
-      const typeNextChar = () => {
-        if (i < fullPrompt.length) {
-          manager.write(fullPrompt[i]);
-          i++;
-          // Faster typing for prompts since they can be long
-          setTimeout(typeNextChar, 5);
-        }
-      };
-      typeNextChar();
-    }, sendDelay);
-
-    return this.runInteractiveSession(manager, toolName, toolColor);
-  }
-
-  /**
    * Common interactive session logic - handles stdin forwarding and detach keys
    */
   private runInteractiveSession(
@@ -1323,14 +1277,14 @@ export class SDKSession {
       forwardPrompt += `\n\nAdditional context: ${additionalMessage.trim()}`;
     }
 
+    // Always send via non-interactive mode first (reliable, clean capture)
+    console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
+    await this.sendToTool(forwardPrompt);
+
+    // If interactive mode requested, enter it AFTER the response for continued conversation
     if (interactive) {
-      // Forward via interactive mode - user can respond to prompts
-      console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
-      await this.enterInteractiveModeWithPrompt(forwardPrompt);
-    } else {
-      // Standard forward - fire and forget
-      console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
-      await this.sendToTool(forwardPrompt);
+      console.log(`\n${colors.dim}Entering interactive mode to continue the conversation...${colors.reset}`);
+      await this.enterInteractiveMode();
     }
   }
 
