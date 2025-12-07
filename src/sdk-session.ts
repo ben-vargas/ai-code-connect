@@ -260,6 +260,8 @@ class Spinner {
   private readonly WARNING_THRESHOLD_MS = 60000; // 60 seconds
   private readonly WARNING_REPEAT_MS = 30000;    // Repeat every 30s after first warning
   private lastWarningTime: number = 0;
+  private statusLine: string = '';
+  private hasStatusLine = false;
 
   constructor(message: string = 'Thinking') {
     this.message = message;
@@ -270,6 +272,8 @@ class Spinner {
     this.startTime = Date.now();
     this.warningShown = false;
     this.lastWarningTime = 0;
+    this.statusLine = '';
+    this.hasStatusLine = false;
 
     // Clear any garbage on the current line before starting spinner
     process.stdout.write('\x1b[2K\r');
@@ -283,8 +287,20 @@ class Spinner {
       // Build the spinner line with elapsed time
       const elapsedDisplay = elapsedSec > 0 ? ` (${elapsedSec}s)` : '';
 
-      // Move cursor back and overwrite
+      // Move cursor back and overwrite spinner line
       process.stdout.write(`\r${SPINNER_FRAMES[this.frameIndex]} ${this.message} ...${elapsedDisplay}   `);
+
+      // If we have a status line, show it below
+      if (this.statusLine) {
+        // Move to next line, clear it, write status, move back up
+        const termWidth = process.stdout.columns || 80;
+        const truncatedStatus = this.statusLine.length > termWidth - 5
+          ? this.statusLine.slice(0, termWidth - 8) + '...'
+          : this.statusLine;
+        process.stdout.write(`\n${colors.dim}  └─ ${truncatedStatus}${colors.reset}\x1b[K`);
+        process.stdout.write('\x1b[1A'); // Move cursor back up
+        this.hasStatusLine = true;
+      }
 
       // Check if we should show a timeout warning
       if (elapsed >= this.WARNING_THRESHOLD_MS) {
@@ -295,11 +311,29 @@ class Spinner {
           this.lastWarningTime = elapsed;
         }
       }
-    }, 80);
+    }, 100); // Slightly slower to reduce flicker
+  }
+
+  /**
+   * Update the status line shown below the spinner
+   */
+  setStatus(status: string): void {
+    // Clean the status - remove ANSI codes and take last meaningful line
+    const cleaned = stripAnsi(status).trim();
+    if (cleaned.length > 0) {
+      // Get last non-empty line
+      const lines = cleaned.split('\n').filter(l => l.trim().length > 0);
+      if (lines.length > 0) {
+        this.statusLine = lines[lines.length - 1].trim();
+      }
+    }
   }
 
   private showTimeoutWarning(elapsedSec: number): void {
-    // Save cursor, move to new line, print warning, restore
+    // Move down if we have status line, then print warning
+    if (this.hasStatusLine) {
+      process.stdout.write('\n');
+    }
     process.stdout.write('\n');
     process.stdout.write(`${colors.yellow}⚠ Still working... (${elapsedSec}s)${colors.reset} - Press ${colors.bold}Ctrl+C${colors.reset} to cancel this request only\n`);
   }
@@ -308,8 +342,12 @@ class Spinner {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
-      // Clear the spinner line (account for longer line with elapsed time)
-      process.stdout.write('\r' + ' '.repeat(this.message.length + 30) + '\r');
+      // Clear the spinner line and status line if present
+      process.stdout.write('\r\x1b[K'); // Clear current line
+      if (this.hasStatusLine) {
+        process.stdout.write('\n\x1b[K\x1b[1A'); // Clear status line below
+      }
+      process.stdout.write('\r');
     }
   }
 
@@ -784,146 +822,189 @@ export class SDKSession {
 
   private sendToClaude(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const args: string[] = ['-p']; // Print mode for regular messages
-
-      // Continue session if we have one
-      if (this.claudeHasSession) {
-        args.push('--continue');
-      }
-
-      // Use stdin for message to avoid E2BIG error with large messages
-      // Claude CLI accepts message from stdin when no message arg is provided
-      args.push('--');  // End of options marker
-
       // Start spinner
       const spinner = new Spinner(`${colors.brightCyan}Claude${colors.reset} is thinking`);
       spinner.start();
 
-      // Store reference for cancellation
-      this.currentProcess = spawn('claude', args, {
+      // Use print mode (-p) for non-interactive message sending
+      // This won't hijack existing sessions
+      const args: string[] = ['-p', message];
+
+      // Continue aic's own session if we have one
+      if (this.claudeHasSession) {
+        args.push('--continue');
+      }
+
+      // Use PTY to capture streaming output with status updates
+      const ptyProc = pty.spawn('claude', args, {
+        name: 'xterm-256color',
+        cols: process.stdout.columns || 80,
+        rows: process.stdout.rows || 24,
         cwd: this.cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],  // Changed to 'pipe' for stdin
-        env: process.env,
-      });
-      const proc = this.currentProcess;
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout!.on('data', (data) => {
-        stdout += data.toString();
+        env: process.env as { [key: string]: string },
       });
 
-      proc.stderr!.on('data', (data) => {
-        stderr += data.toString();
+      let outputBuffer = '';
+      let finished = false;
+
+      // Handle PTY output
+      const outputHandler = ptyProc.onData((data: string) => {
+        outputBuffer += data;
+        spinner.setStatus(data);
       });
 
-      proc.on('close', (code) => {
+      const finishSuccess = () => {
+        if (finished) return;
+        finished = true;
+
+        outputHandler.dispose();
         spinner.stop();
-        this.currentProcess = null;
+        ptyProc.kill();
 
-        if (code !== 0) {
-          // Check if it was cancelled
-          if (this.cancelRequested) {
-            this.cancelRequested = false;
-            reject(new Error('Request cancelled by user'));
-          } else {
-            reject(new Error(`Claude exited with code ${code}: ${stderr || stdout}`));
-          }
-        } else {
-          // Render the response with markdown formatting
-          console.log('');
-          const rendered = marked.parse(stdout.trim()) as string;
+        const response = stripAnsi(outputBuffer).trim();
+
+        // Render the response
+        console.log('');
+        if (response) {
+          const rendered = marked.parse(response) as string;
           process.stdout.write(rendered);
-          console.log('');
+        }
+        console.log('');
 
+        this.claudeHasSession = true;
+        resolve(response);
+      };
+
+      // Handle process exit
+      ptyProc.onExit(({ exitCode }) => {
+        if (finished) return;
+
+        outputHandler.dispose();
+        spinner.stop();
+
+        if (exitCode === 0) {
+          finishSuccess();
+        } else {
+          finished = true;
+          // Non-zero exit might mean Claude needs interaction
+          console.log('');
+          console.log(`${colors.yellow}⚠ Claude may need your input.${colors.reset} Use ${colors.brightYellow}/i${colors.reset} to interact.`);
+          console.log('');
           this.claudeHasSession = true;
-          resolve(stripAnsi(stdout).trim());
+          resolve(stripAnsi(outputBuffer).trim());
         }
       });
 
-      proc.on('error', (err) => {
+      // Timeout fallback
+      setTimeout(() => {
+        if (finished) return;
+        finished = true;
         spinner.stop();
-        this.currentProcess = null;
-        reject(err);
-      });
-
-      // Write message to stdin and close it
-      proc.stdin!.write(message);
-      proc.stdin!.end();
+        outputHandler.dispose();
+        ptyProc.kill();
+        console.log(`\n${colors.yellow}⚠ Timeout - use /i to check session${colors.reset}\n`);
+        this.claudeHasSession = true;
+        resolve(stripAnsi(outputBuffer).trim());
+      }, 120000);
     });
   }
 
 
   private sendToGemini(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const args: string[] = [];
-
-      // Resume session if we have one
-      if (this.geminiHasSession) {
-        args.push('--resume', 'latest');
-      }
-
-      // Use stdin for message to avoid E2BIG error with large messages
-      // Gemini CLI accepts message from stdin when piped
-      args.push('--');  // End of options marker
-
       // Start spinner
       const spinner = new Spinner(`${colors.brightMagenta}Gemini${colors.reset} is thinking`);
       spinner.start();
 
-      // Store reference for cancellation
-      this.currentProcess = spawn('gemini', args, {
+      // Use positional prompt for non-interactive mode
+      // This won't hijack existing sessions
+      const args: string[] = [message];
+
+      // Resume aic's own session if we have one
+      if (this.geminiHasSession) {
+        args.push('--resume', 'latest');
+      }
+
+      // Use PTY to capture streaming output with status updates
+      const ptyProc = pty.spawn('gemini', args, {
+        name: 'xterm-256color',
+        cols: process.stdout.columns || 80,
+        rows: process.stdout.rows || 24,
         cwd: this.cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],  // Changed to 'pipe' for stdin
-        env: process.env,
-      });
-      const proc = this.currentProcess;
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout!.on('data', (data) => {
-        stdout += data.toString();
+        env: process.env as { [key: string]: string },
       });
 
-      proc.stderr!.on('data', (data) => {
-        stderr += data.toString();
+      let outputBuffer = '';
+      let finished = false;
+
+      // Handle PTY output
+      const outputHandler = ptyProc.onData((data: string) => {
+        outputBuffer += data;
+        spinner.setStatus(data);
       });
 
-      proc.on('close', (code) => {
+      const cleanGeminiOutput = (output: string): string => {
+        // Remove "Loaded cached credentials." line and clean up
+        return stripAnsi(output)
+          .split('\n')
+          .filter(line => !line.includes('Loaded cached credentials'))
+          .join('\n')
+          .trim();
+      };
+
+      const finishSuccess = () => {
+        if (finished) return;
+        finished = true;
+
+        outputHandler.dispose();
         spinner.stop();
-        this.currentProcess = null;
+        ptyProc.kill();
 
-        if (code !== 0) {
-          // Check if it was cancelled
-          if (this.cancelRequested) {
-            this.cancelRequested = false;
-            reject(new Error('Request cancelled by user'));
-          } else {
-            reject(new Error(`Gemini exited with code ${code}: ${stderr || stdout}`));
-          }
-        } else {
-          // Render the response with markdown formatting
-          console.log('');
-          const rendered = marked.parse(stdout.trim()) as string;
+        const response = cleanGeminiOutput(outputBuffer);
+
+        // Render the response
+        console.log('');
+        if (response) {
+          const rendered = marked.parse(response) as string;
           process.stdout.write(rendered);
-          console.log('');
+        }
+        console.log('');
 
+        this.geminiHasSession = true;
+        resolve(response);
+      };
+
+      // Handle process exit
+      ptyProc.onExit(({ exitCode }) => {
+        if (finished) return;
+
+        outputHandler.dispose();
+        spinner.stop();
+
+        if (exitCode === 0) {
+          finishSuccess();
+        } else {
+          finished = true;
+          // Non-zero exit might mean Gemini needs interaction
+          console.log('');
+          console.log(`${colors.yellow}⚠ Gemini may need your input.${colors.reset} Use ${colors.brightYellow}/i${colors.reset} to interact.`);
+          console.log('');
           this.geminiHasSession = true;
-          resolve(stripAnsi(stdout).trim());
+          resolve(cleanGeminiOutput(outputBuffer));
         }
       });
 
-      proc.on('error', (err) => {
+      // Timeout fallback
+      setTimeout(() => {
+        if (finished) return;
+        finished = true;
         spinner.stop();
-        this.currentProcess = null;
-        reject(err);
-      });
-
-      // Write message to stdin and close it
-      proc.stdin!.write(message);
-      proc.stdin!.end();
+        outputHandler.dispose();
+        ptyProc.kill();
+        console.log(`\n${colors.yellow}⚠ Timeout - use /i to check session${colors.reset}\n`);
+        this.geminiHasSession = true;
+        resolve(cleanGeminiOutput(outputBuffer));
+      }, 120000);
     });
   }
 
