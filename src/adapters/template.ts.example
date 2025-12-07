@@ -1,119 +1,183 @@
 /**
  * Template for adding a new AI CLI tool adapter
- * 
+ *
  * To add a new tool (e.g., OpenAI Codex):
  * 1. Copy this file to src/adapters/codex.ts
- * 2. Implement the ToolAdapter interface
+ * 2. Implement ALL required properties and methods
  * 3. Register in src/adapters/index.ts
- * 4. Add to sdk-session.ts tool list
+ * 4. Add to src/index.ts registry
+ * 5. The tool will automatically appear in the UI
  */
 
 import { ToolAdapter, SendOptions } from './base.js';
-import { commandExists, stripAnsi } from '../utils.js';
-import { spawn } from 'child_process';
+import { runCommand, commandExists, stripAnsi } from '../utils.js';
 
 export class CodexAdapter implements ToolAdapter {
-  // Unique identifier - used in commands like /codex
+  // ============================================
+  // Required Properties
+  // ============================================
+
+  /** Unique identifier - used in commands like /codex */
   readonly name = 'codex';
-  
-  // Display name for UI
+
+  /** Display name shown in UI */
   readonly displayName = 'OpenAI Codex';
 
-  // Track if we have an active session
-  private hasActiveSession = false;
+  /** ANSI color code for UI elements */
+  readonly color = '\x1b[92m'; // brightGreen
 
   /**
-   * Check if the CLI tool is installed
-   * Returns true if the command exists in PATH
+   * Regex pattern to detect when tool shows its input prompt (ready for input)
+   * This is used by the persistent PTY to know when the tool is idle
+   * Examples:
+   *   Claude: /❯\s*(\w*\s*→)?.*$/m
+   *   Gemini: /^>\s*$/m
+   */
+  readonly promptPattern = /^>\s*$/m;
+
+  /**
+   * Fallback timeout in ms - if no output for this long, assume response complete
+   * Used when promptPattern doesn't match (e.g., tool has different prompt format)
+   */
+  readonly idleTimeout = 2000;
+
+  /**
+   * Time in ms to wait for tool to start before sending commands
+   * First launch is slower due to initialization, auth checks, etc.
+   */
+  readonly startupDelay = 3000;
+
+  // ============================================
+  // Private State
+  // ============================================
+
+  private hasActiveSession = false;
+
+  // ============================================
+  // Required Methods
+  // ============================================
+
+  /**
+   * Check if the CLI tool is installed and available
    */
   async isAvailable(): Promise<boolean> {
-    // Replace 'codex' with the actual CLI command name
     return commandExists('codex');
   }
 
   /**
-   * Build the command array for executing the tool
+   * Build the command array for executing the tool in print mode
    * This should handle session continuation flags
    */
   getCommand(prompt: string, options?: SendOptions): string[] {
     const args: string[] = [];
-    
+
+    // Add print/non-interactive mode flag if your tool has one
+    args.push('--print');
+
     // Add session continuation flag if needed
-    // Example: --continue, --resume, etc.
-    if (this.hasActiveSession) {
-      args.push('--continue'); // Adjust based on the tool's CLI
+    if (options?.continueSession !== false && this.hasActiveSession) {
+      args.push('--continue');
     }
 
-    // Add working directory if specified
-    if (options?.cwd) {
-      args.push('--cwd', options.cwd);
-    }
-
-    // Add the prompt
+    // Add the prompt as the last argument
     args.push(prompt);
 
     return ['codex', ...args];
   }
 
   /**
-   * Send a prompt to the tool and return the response
-   * This is used in "print mode" (non-interactive)
+   * Build the command array for starting an interactive session
    */
-  async send(prompt: string, options?: SendOptions): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const args = this.getCommand(prompt, options).slice(1);
+  getInteractiveCommand(options?: SendOptions): string[] {
+    const args: string[] = [];
 
-      const proc = spawn('codex', args, {
-        cwd: options?.cwd || process.cwd(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env,
-      });
+    // Add session continuation if we have an active session
+    if (options?.continueSession !== false && this.hasActiveSession) {
+      args.push('--continue');
+    }
 
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data) => {
-        const text = data.toString();
-        process.stdout.write(text); // Stream to user
-        stdout += text;
-      });
-
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          reject(new Error(`Codex exited with code ${code}: ${stderr || stdout}`));
-        } else {
-          this.hasActiveSession = true;
-          resolve(stripAnsi(stdout).trim());
-        }
-      });
-
-      proc.on('error', reject);
-    });
+    return ['codex', ...args];
   }
 
   /**
-   * Reset the conversation context
+   * Get arguments for starting a persistent PTY session
+   * Called when spawning a long-running interactive process
+   */
+  getPersistentArgs(): string[] {
+    if (this.hasActiveSession) {
+      return ['--continue'];
+    }
+    return [];
+  }
+
+  /**
+   * Clean response output - remove UI noise like spinners, prompts, status lines
+   * This is used to extract the actual response content for forwarding
+   */
+  cleanResponse(rawOutput: string): string {
+    let output = rawOutput;
+
+    // Remove ANSI escape sequences
+    output = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    output = output.replace(/\x1b\[\??\d+[hl]/g, '');
+    output = output.replace(/\x1b\[\d* ?q/g, '');
+    output = output.replace(/\x1b\][^\x07]*\x07/g, ''); // OSC sequences
+
+    // Remove spinner frames
+    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+
+    // Remove the prompt character (adjust for your tool)
+    output = output.replace(/^>\s*$/gm, '');
+
+    // Remove tool-specific UI elements
+    // Add patterns specific to your tool here
+
+    // Final cleanup
+    output = output.replace(/\n{3,}/g, '\n\n');
+    output = output.replace(/^\s+$/gm, '');
+
+    return output.trim();
+  }
+
+  /**
+   * Send a prompt to the tool and get a response (print mode)
+   */
+  async send(prompt: string, options?: SendOptions): Promise<string> {
+    const args = this.getCommand(prompt, options).slice(1); // Remove 'codex' from start
+
+    const result = await runCommand('codex', args, {
+      cwd: options?.cwd || process.cwd(),
+    });
+
+    if (result.exitCode !== 0) {
+      const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
+      throw new Error(`Codex exited with code ${result.exitCode}: ${errorMsg}`);
+    }
+
+    // Mark that we now have an active session
+    this.hasActiveSession = true;
+
+    return result.stdout.trim();
+  }
+
+  /**
+   * Reset conversation context
    */
   resetContext(): void {
     this.hasActiveSession = false;
   }
 
   /**
-   * Check if there's an active session
+   * Check if there's an active session with this tool
    */
   hasSession(): boolean {
     return this.hasActiveSession;
   }
 
   /**
-   * Set session state (for persistence)
+   * Set whether there's an active session (for persistence)
    */
   setHasSession(value: boolean): void {
     this.hasActiveSession = value;
   }
 }
-

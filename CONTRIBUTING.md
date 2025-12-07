@@ -13,6 +13,7 @@ src/
 │   ├── index.ts             # Exports all adapters
 │   └── template.ts.example  # Template for new adapters
 ├── sdk-session.ts           # Interactive session & command handling
+├── persistent-pty.ts        # Persistent PTY management for tools
 ├── index.ts                 # CLI entry point
 ├── config.ts                # Configuration management (~/.aic/)
 ├── utils.ts                 # Utility functions
@@ -49,53 +50,60 @@ Copy the template and create your adapter:
 cp src/adapters/template.ts.example src/adapters/codex.ts
 ```
 
-Edit `src/adapters/codex.ts`:
+Edit `src/adapters/codex.ts`. The `ToolAdapter` interface requires these properties and methods:
 
 ```typescript
 import { ToolAdapter, SendOptions } from './base.js';
-import { commandExists, stripAnsi } from '../utils.js';
-import { spawn } from 'child_process';
+import { runCommand, commandExists } from '../utils.js';
 
 export class CodexAdapter implements ToolAdapter {
-  readonly name = 'codex';           // Used in /codex command
-  readonly displayName = 'OpenAI Codex';  // Shown in UI
-  
+  // Required properties
+  readonly name = 'codex';                    // Used in /codex command
+  readonly displayName = 'OpenAI Codex';      // Shown in UI
+  readonly color = '\x1b[92m';                // ANSI color (brightGreen)
+  readonly promptPattern = /^>\s*$/m;         // Regex to detect input prompt
+  readonly idleTimeout = 2000;                // Fallback timeout (ms)
+  readonly startupDelay = 3000;               // First launch delay (ms)
+
   private hasActiveSession = false;
 
   async isAvailable(): Promise<boolean> {
-    return commandExists('codex');  // Check if CLI is installed
+    return commandExists('codex');
   }
 
   getCommand(prompt: string, options?: SendOptions): string[] {
-    const args: string[] = [];
-    
-    // Add your tool's session continuation flag
-    if (this.hasActiveSession) {
-      args.push('--continue');  // Adjust for your tool
-    }
-
+    const args: string[] = ['--print'];
+    if (this.hasActiveSession) args.push('--continue');
     args.push(prompt);
     return ['codex', ...args];
   }
 
+  getInteractiveCommand(options?: SendOptions): string[] {
+    return this.hasActiveSession ? ['codex', '--continue'] : ['codex'];
+  }
+
+  getPersistentArgs(): string[] {
+    return this.hasActiveSession ? ['--continue'] : [];
+  }
+
+  cleanResponse(rawOutput: string): string {
+    // Remove ANSI codes, spinners, prompts - see template for details
+    return rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+  }
+
   async send(prompt: string, options?: SendOptions): Promise<string> {
-    // Implement sending prompt and capturing response
-    // See template.ts.example for full implementation
+    const result = await runCommand('codex', this.getCommand(prompt, options).slice(1));
+    this.hasActiveSession = true;
+    return result.stdout.trim();
   }
 
-  resetContext(): void {
-    this.hasActiveSession = false;
-  }
-
-  hasSession(): boolean {
-    return this.hasActiveSession;
-  }
-
-  setHasSession(value: boolean): void {
-    this.hasActiveSession = value;
-  }
+  resetContext(): void { this.hasActiveSession = false; }
+  hasSession(): boolean { return this.hasActiveSession; }
+  setHasSession(value: boolean): void { this.hasActiveSession = value; }
 }
 ```
+
+See `src/adapters/template.ts.example` for a complete, well-documented implementation.
 
 ### Step 2: Register the Adapter
 
@@ -121,58 +129,32 @@ registry.register(new CodexAdapter());  // Add this line
 
 ### Step 3: Add to SDK Session
 
-Edit `src/sdk-session.ts`. There are several places to update:
+Edit `src/sdk-session.ts` to add the new tool's switch command.
 
-**Quick summary of changes needed:**
-- Add to `AVAILABLE_TOOLS` array
-- Add to `activeTool` type union
-- Add session tracking flag
-- Add to `sendToTool()` if/else
-- Create `sendToCodex()` method (copy from `sendToClaude`)
-- Add to command menu
-- Add to `handleMetaCommand` switch
-
-**Tip for AI-assisted development:** If you're using Claude Code or similar, just say:
+**Using AI-assisted development:** If you're using Claude Code or similar, just say:
 > "Add a new tool called 'codex' for OpenAI Codex CLI. Follow the pattern used for claude and gemini in sdk-session.ts"
 
-The AI will find all the relevant locations and make the changes.
+**Manual steps:**
 
-**Manual steps if needed:**
-
-1. **Add to AVAILABLE_TOOLS array** (search for `AVAILABLE_TOOLS`):
-```typescript
-{ name: 'codex', displayName: 'OpenAI Codex', color: colors.brightGreen },
-```
-
-2. **Add session flag** (search for `claudeHasSession`):
-```typescript
-private codexHasSession = false;
-```
-
-3. **Add send method** - Copy `sendToClaude()` and modify:
-   - Change spinner text
-   - Change CLI command and flags for Codex
-   - Update session flag name
-
-4. **Add to sendToTool()** (search for `sendToTool`):
-```typescript
-} else if (this.activeTool === 'codex') {
-  response = await this.sendToCodex(message);
-}
-```
-
-5. **Add to command menu** (search for `AIC_COMMANDS`):
-```typescript
-{ value: '/codex', name: '/codex         Switch to Codex', description: 'Switch to OpenAI Codex' },
-```
-
-6. **Add to handleMetaCommand** (search for `case 'gemini'`):
+1. **Add to handleMetaCommand switch** (search for `case 'gemini'`):
 ```typescript
 case 'codex':
   this.activeTool = 'codex';
-  console.log(`● Switched to ${colors.brightGreen}OpenAI Codex${colors.reset}`);
+  console.log(`${colors.green}●${colors.reset} Switched to ${colors.brightGreen}OpenAI Codex${colors.reset}`);
   break;
 ```
+
+2. **Add to command autocomplete** (search for `const commands =`):
+```typescript
+const commands = ['/claude', '/gemini', '/codex', ...];
+```
+
+3. **Add to splash screen commands** (search for `commandsLeft`):
+```typescript
+`  ${rainbowText('/codex', 2)}        Switch to OpenAI Codex`,
+```
+
+The adapter registry handles tool discovery automatically - no need to modify `sendToTool()` or add session flags manually.
 
 ### Step 4: Build and Test
 
@@ -186,9 +168,9 @@ aic        # Test switching to new tool with /codex
 
 ### Session Continuation
 Each CLI tool handles session continuation differently:
-- **Claude Code**: `--continue` flag
+- **Claude Code**: `--session-id <uuid>` for first call, `--resume <uuid>` for subsequent calls
 - **Gemini CLI**: `--resume latest` flag
-- **Your tool**: Check your tool's documentation
+- **Your tool**: Check your tool's documentation for session/conversation continuation flags
 
 ### Forward Behavior
 The `/forward` command behavior changes based on how many tools are registered:

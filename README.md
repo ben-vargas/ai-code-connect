@@ -187,11 +187,11 @@ This is useful when:
 
 ### Session Persistence
 
-Sessions persist automatically:
-- **Claude**: Uses `--continue` flag
+Sessions persist automatically within an AIC² session:
+- **Claude**: Uses unique session IDs (`--session-id` / `--resume`) isolated from other Claude instances
 - **Gemini**: Uses `--resume latest` flag
 
-Your conversation context is maintained across messages.
+Your conversation context is maintained across messages within the same AIC² session.
 
 ## CLI Options
 
@@ -233,14 +233,16 @@ Configuration is stored in `~/.aic/config.json`.
 ```
 src/
 ├── adapters/
-│   ├── base.ts              # ToolAdapter interface
+│   ├── base.ts              # ToolAdapter interface & registry
 │   ├── claude.ts            # Claude Code adapter
 │   ├── gemini.ts            # Gemini CLI adapter
+│   ├── index.ts             # Exports all adapters
 │   └── template.ts.example  # Template for new adapters
-├── sdk-session.ts           # Interactive session logic
+├── sdk-session.ts           # Interactive session & command handling
+├── persistent-pty.ts        # Persistent PTY management for tools
 ├── index.ts                 # CLI entry point
-├── config.ts                # Configuration management
-├── utils.ts                 # Utilities
+├── config.ts                # Configuration management (~/.aic/)
+├── utils.ts                 # Utilities (command execution, etc.)
 └── version.ts               # Version from package.json
 ```
 
@@ -308,6 +310,16 @@ Test files live alongside source files with a `.test.ts` suffix:
 - `src/config.ts` → `src/config.test.ts`
 
 Tests are excluded from the build output (`dist/`) but are committed to git.
+
+## Vibe Coding Alert
+
+Full transparency: this project was built by a non-developer using AI coding assistants (yes, the very tools this project connects). If you're an experienced developer or architect, you might look at this codebase and wince. That's okay.
+
+The goal here was to scratch an itch and learn along the way. The code works, but it's likely missing patterns, optimizations, or elegance that only years of experience can provide.
+
+**This is where you come in.** If you see something that makes you cringe, please consider contributing rather than just closing the tab. This is open source specifically because human expertise is irreplaceable. Whether it's refactoring, performance improvements, better error handling, or architectural guidance - PRs and issues are welcome.
+
+Think of it as a chance to mentor an AI-assisted developer through code review. We all benefit when experienced developers share their knowledge.
 
 ## License
 
