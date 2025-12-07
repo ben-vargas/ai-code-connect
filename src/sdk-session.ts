@@ -1024,8 +1024,32 @@ export class SDKSession {
           process.stdin.removeListener('data', onStdinData);
         }
 
+        // Capture the output buffer before detaching for /fwd support
+        const outputBuffer = manager.getOutputBuffer();
+
         manager.detach();
         cleanup();
+
+        // Extract and save the assistant's response to conversation history
+        // This enables /fwd to forward responses from interactive sessions
+        if (outputBuffer && outputBuffer.length > 0) {
+          const adapter = this.registry.get(this.activeTool);
+          if (adapter) {
+            const cleanedResponse = adapter.cleanResponse(outputBuffer);
+            // Only add if there's meaningful content (not just prompts/empty)
+            if (cleanedResponse && cleanedResponse.length > 20) {
+              this.conversationHistory.push({
+                tool: this.activeTool,
+                role: 'assistant',
+                content: cleanedResponse,
+              });
+              // Enforce history size limit
+              while (this.conversationHistory.length > MAX_HISTORY_SIZE) {
+                this.conversationHistory.shift();
+              }
+            }
+          }
+        }
 
         process.stdout.write('\x1b[2K\r');
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);

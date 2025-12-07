@@ -68,24 +68,80 @@ export class GeminiAdapter implements ToolAdapter {
   cleanResponse(rawOutput: string): string {
     let output = rawOutput;
 
+    // Remove all ANSI escape sequences first
+    output = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    output = output.replace(/\x1b\[\??\d+[hl]/g, '');
+    output = output.replace(/\x1b\[\d* ?q/g, '');
+    output = output.replace(/\x1b\][^\x07]*\x07/g, ''); // OSC sequences
+
     // Remove "Loaded cached credentials." line
     output = output.replace(/Loaded cached credentials\.?\s*/g, '');
 
     // Remove spinner frames
     output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
 
-    // Remove the prompt line itself
+    // Remove box drawing characters and lines made of them
+    output = output.replace(/[╭╮╰╯│─┌┐└┘├┤┬┴┼║═╔╗╚╝╠╣╦╩╬]/g, '');
+
+    // Remove Gemini UI-specific lines
+    output = output.replace(/^\s*Using:.*MCP servers?\s*$/gm, '');
+    output = output.replace(/^\s*~\/.*\(main\*?\).*$/gm, ''); // Directory status line
+    output = output.replace(/^\s*no sandbox.*$/gim, '');
+    output = output.replace(/^\s*auto\s*$/gm, '');
+    output = output.replace(/^\s*Reading.*\(esc to cancel.*\)\s*$/gm, '');
+    output = output.replace(/^\s*Type your message or @path.*$/gm, '');
+    output = output.replace(/^\s*>\s*Type your message.*$/gm, '');
+    output = output.replace(/^\s*\?\s*for shortcuts\s*$/gm, '');
+    output = output.replace(/^\s*Try ".*"\s*$/gm, ''); // Suggestion lines
+
+    // Remove tool status lines (✓ ReadFolder, ✓ ReadFile, etc.)
+    output = output.replace(/^\s*[✓✗]\s+\w+.*$/gm, '');
+
+    // Remove the prompt character
     output = output.replace(/^>\s*$/gm, '');
 
-    // Remove cursor movement and line clearing escape sequences
-    output = output.replace(/\x1b\[\d*[ABCDEFGJKST]/g, '');
-    output = output.replace(/\x1b\[\d*;\d*[Hf]/g, '');
-    output = output.replace(/\x1b\[[\d;]*m/g, ''); // Color codes
-    output = output.replace(/\x1b\[\??\d+[hl]/g, ''); // Mode changes
-    output = output.replace(/\x1b\[\d* ?q/g, ''); // Cursor style
+    // Extract just the response content - look for ✦ markers (Gemini's response indicator)
+    // and extract the text that follows
+    const responseBlocks: string[] = [];
+    const lines = output.split('\n');
+    let inResponse = false;
+    let currentBlock: string[] = [];
 
-    // Clean up excessive whitespace
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Start of a response block
+      if (trimmed.startsWith('✦')) {
+        if (currentBlock.length > 0) {
+          responseBlocks.push(currentBlock.join('\n'));
+        }
+        currentBlock = [trimmed.replace(/^✦\s*/, '')];
+        inResponse = true;
+      } else if (inResponse && trimmed.length > 0) {
+        // Continue capturing response content
+        // Skip empty lines and UI garbage
+        if (!trimmed.match(/^[\s│─╭╮╰╯]*$/) && trimmed.length > 2) {
+          currentBlock.push(line);
+        }
+      } else if (trimmed.length === 0 && inResponse) {
+        // Empty line in response - keep it for formatting
+        currentBlock.push('');
+      }
+    }
+
+    // Don't forget the last block
+    if (currentBlock.length > 0) {
+      responseBlocks.push(currentBlock.join('\n'));
+    }
+
+    // If we found response blocks, use those; otherwise fall back to cleaned output
+    if (responseBlocks.length > 0) {
+      output = responseBlocks.join('\n\n');
+    }
+
+    // Final cleanup
     output = output.replace(/\n{3,}/g, '\n\n');
+    output = output.replace(/^\s+$/gm, ''); // Lines with only whitespace
 
     return output.trim();
   }

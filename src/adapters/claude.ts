@@ -1,13 +1,14 @@
+import { randomUUID } from 'crypto';
 import { ToolAdapter, SendOptions } from './base.js';
 import { runCommand, commandExists, stripAnsi } from '../utils.js';
 
 /**
  * Adapter for Claude Code CLI
- * 
+ *
  * Claude Code supports:
  * - Non-interactive mode via -p/--print flag
  * - Output formats: text, json, stream-json
- * - Session continuation via -c/--continue or -r/--resume
+ * - Session continuation via --session-id (isolated from other sessions in same directory)
  */
 export class ClaudeAdapter implements ToolAdapter {
   readonly name = 'claude';
@@ -26,17 +27,54 @@ export class ClaudeAdapter implements ToolAdapter {
   readonly startupDelay = 2500;
 
   private hasActiveSession = false;
-  
+
+  // Unique session ID for aic's Claude sessions - prevents collision with
+  // other Claude Code sessions running in the same directory
+  private sessionId: string | null = null;
+
+  // Track if we've used the session ID at least once (to know whether to use --session-id or --resume)
+  private sessionCreated = false;
+
   async isAvailable(): Promise<boolean> {
     return commandExists('claude');
   }
-  
+
+  /**
+   * Get or create a unique session ID for aic's Claude sessions.
+   * This isolates aic from other Claude Code sessions in the same directory.
+   */
+  private getOrCreateSessionId(): string {
+    if (!this.sessionId) {
+      this.sessionId = randomUUID();
+    }
+    return this.sessionId;
+  }
+
+  /**
+   * Get session args for Claude commands.
+   * First call uses --session-id to CREATE the session.
+   * Subsequent calls use --resume to CONTINUE the session (avoids "already in use" errors).
+   */
+  private getSessionArgs(): string[] {
+    const sessionId = this.getOrCreateSessionId();
+    if (!this.sessionCreated) {
+      // First call - create the session with this ID
+      // Mark as created immediately so subsequent calls use --resume
+      // (even if this command fails, the session ID is reserved)
+      this.sessionCreated = true;
+      return ['--session-id', sessionId];
+    } else {
+      // Subsequent calls - resume the existing session
+      return ['--resume', sessionId];
+    }
+  }
+
   getCommand(prompt: string, options?: SendOptions): string[] {
     // For slash commands, run without -p to access Claude's internal commands
     const isSlashCommand = prompt.startsWith('/');
-    
+
     const args: string[] = [];
-    
+
     if (!isSlashCommand) {
       args.push('-p'); // Print mode for regular prompts
       // Enable tools in print mode (requires permission mode to auto-approve)
@@ -44,42 +82,47 @@ export class ClaudeAdapter implements ToolAdapter {
       args.push('--permission-mode', 'acceptEdits');
     }
 
-    // Continue previous session if we've already made a call
-    const shouldContinue = options?.continueSession !== false && this.hasActiveSession;
-    if (shouldContinue) {
-      args.push('--continue');
+    // Use session args to isolate and continue aic's sessions
+    if (options?.continueSession !== false) {
+      args.push(...this.getSessionArgs());
     }
 
     // Add the prompt as the last argument (only for non-slash commands in print mode)
     if (!isSlashCommand) {
       args.push(prompt);
     }
-    
+
     return ['claude', ...args];
   }
 
   getInteractiveCommand(options?: SendOptions): string[] {
     const args: string[] = [];
-    // Continue session if we have one
-    if (options?.continueSession !== false && this.hasActiveSession) {
-      args.push('--continue');
+    // Use session args to maintain isolated session
+    if (options?.continueSession !== false) {
+      args.push(...this.getSessionArgs());
     }
     return ['claude', ...args];
   }
 
   getPersistentArgs(): string[] {
-    // Continue previous session if we have one from regular mode
-    if (this.hasActiveSession) {
-      return ['--continue'];
-    }
-    return [];
+    // Use session args for PTY - will create or resume as appropriate
+    return this.getSessionArgs();
   }
 
   cleanResponse(rawOutput: string): string {
     let output = rawOutput;
 
+    // Remove all ANSI escape sequences first
+    output = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    output = output.replace(/\x1b\[\??\d+[hl]/g, '');
+    output = output.replace(/\x1b\[\d* ?q/g, '');
+    output = output.replace(/\x1b\][^\x07]*\x07/g, ''); // OSC sequences
+
     // Remove spinner frames
     output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+
+    // Remove box drawing characters
+    output = output.replace(/[╭╮╰╯│─┌┐└┘├┤┬┴┼║═╔╗╚╝╠╣╦╩╬▐▛▜▝▘]/g, '');
 
     // Remove common status line patterns (e.g., "Reading file...", "Thinking...")
     output = output.replace(/^(Reading|Writing|Analyzing|Thinking|Searching|Running).*$/gm, '');
@@ -88,15 +131,56 @@ export class ClaudeAdapter implements ToolAdapter {
     output = output.replace(/❯\s*[a-z]+\s*→.*$/gm, '');
     output = output.replace(/❯\s*$/gm, '');
 
-    // Remove cursor movement and line clearing escape sequences
-    output = output.replace(/\x1b\[\d*[ABCDEFGJKST]/g, '');
-    output = output.replace(/\x1b\[\d*;\d*[Hf]/g, '');
-    output = output.replace(/\x1b\[[\d;]*m/g, ''); // Color codes
-    output = output.replace(/\x1b\[\??\d+[hl]/g, ''); // Mode changes
-    output = output.replace(/\x1b\[\d* ?q/g, ''); // Cursor style
+    // Remove Claude Code UI elements
+    output = output.replace(/^\s*Claude Code v[\d.]+\s*$/gm, '');
+    output = output.replace(/^\s*Opus.*API Usage.*$/gm, '');
+    output = output.replace(/^\s*\/model to try.*$/gm, '');
+    output = output.replace(/^\s*~\/.*$/gm, ''); // Directory paths
+    output = output.replace(/^\s*\?\s*for shortcuts\s*$/gm, '');
+    output = output.replace(/^\s*Try ".*"\s*$/gm, '');
 
-    // Clean up excessive whitespace
+    // Remove tool use indicators (⏺ Read, ⏺ Write, etc.) but keep content
+    output = output.replace(/^⏺\s+(Read|Write|Edit|Bash|Glob|Grep)\(.*\)\s*$/gm, '');
+    output = output.replace(/^\s*⎿\s+.*$/gm, ''); // Tool result indicators
+
+    // Extract response content - Claude responses often start with ⏺
+    const responseBlocks: string[] = [];
+    const lines = output.split('\n');
+    let inResponse = false;
+    let currentBlock: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Start of a response block (⏺ without tool name after it)
+      if (trimmed.startsWith('⏺') && !trimmed.match(/^⏺\s+(Read|Write|Edit|Bash|Glob|Grep)/)) {
+        if (currentBlock.length > 0) {
+          responseBlocks.push(currentBlock.join('\n'));
+        }
+        currentBlock = [trimmed.replace(/^⏺\s*/, '')];
+        inResponse = true;
+      } else if (inResponse && trimmed.length > 0) {
+        // Continue capturing response content
+        if (!trimmed.match(/^[\s│─╭╮╰╯]*$/) && trimmed.length > 2) {
+          currentBlock.push(line);
+        }
+      } else if (trimmed.length === 0 && inResponse) {
+        currentBlock.push('');
+      }
+    }
+
+    if (currentBlock.length > 0) {
+      responseBlocks.push(currentBlock.join('\n'));
+    }
+
+    // If we found response blocks, use those; otherwise use cleaned output
+    if (responseBlocks.length > 0) {
+      output = responseBlocks.join('\n\n');
+    }
+
+    // Final cleanup
     output = output.replace(/\n{3,}/g, '\n\n');
+    output = output.replace(/^\s+$/gm, '');
 
     return output.trim();
   }
@@ -123,15 +207,23 @@ export class ClaudeAdapter implements ToolAdapter {
   
   resetContext(): void {
     this.hasActiveSession = false;
+    // Generate a new session ID on reset to start fresh
+    this.sessionId = null;
+    this.sessionCreated = false;
   }
-  
+
   /** Check if there's an active session */
   hasSession(): boolean {
     return this.hasActiveSession;
   }
-  
+
   /** Mark that a session exists (for loading from persisted state) */
   setHasSession(value: boolean): void {
     this.hasActiveSession = value;
+  }
+
+  /** Get current session ID (for debugging/logging) */
+  getSessionId(): string | null {
+    return this.sessionId;
   }
 }
