@@ -28,6 +28,12 @@ This is tedious and breaks your flow.
 
 ## The Solution
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=CNsMhvaSuAs">
+    <img src="https://img.youtube.com/vi/CNsMhvaSuAs/maxresdefault.jpg" alt="AIC² Demo Video" width="70%">
+  </a>
+</p>
+
 `aic` bridges both tools in a single interactive session with:
 - **Persistent sessions** - Both tools remember context
 - **One-command forwarding** - Send responses between tools instantly
