@@ -99,6 +99,10 @@ export class PersistentPtyManager {
   // Flag to suppress exit messages when intentionally killed
   private suppressExitMessage: boolean = false;
 
+  // Track how much of the buffer has been saved to history
+  // This allows us to only capture NEW content on detach, not the entire session
+  private lastSavedBufferLength: number = 0;
+
   constructor(private config: PtyConfig) {}
 
   /**
@@ -201,10 +205,30 @@ export class PersistentPtyManager {
    */
   clearOutputBuffer(): void {
     this.outputBuffer = '';
+    this.lastSavedBufferLength = 0;
     // Also reset the headless terminal
     if (this.headlessTerminal) {
       this.headlessTerminal.reset();
     }
+  }
+
+  /**
+   * Get only the NEW output since the last time we saved to history.
+   * This prevents forwarding the entire session when detaching.
+   */
+  getNewOutputSinceLastSave(): string {
+    if (this.outputBuffer.length <= this.lastSavedBufferLength) {
+      return '';
+    }
+    return this.outputBuffer.slice(this.lastSavedBufferLength);
+  }
+
+  /**
+   * Mark the current buffer position as saved.
+   * Call this after saving content to conversation history.
+   */
+  markBufferAsSaved(): void {
+    this.lastSavedBufferLength = this.outputBuffer.length;
   }
 
   /**

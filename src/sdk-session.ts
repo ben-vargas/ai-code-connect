@@ -1168,18 +1168,18 @@ export class SDKSession {
           process.stdin.removeListener('data', onStdinData);
         }
 
-        // Capture the output buffer before detaching for /fwd support
-        const outputBuffer = manager.getOutputBuffer();
+        // Capture only NEW output since last save (not the entire session)
+        const newOutput = manager.getNewOutputSinceLastSave();
 
         manager.detach();
         cleanup();
 
         // Extract and save the assistant's response to conversation history
         // This enables /fwd to forward responses from interactive sessions
-        if (outputBuffer && outputBuffer.length > 0) {
+        if (newOutput && newOutput.length > 0) {
           const adapter = this.registry.get(this.activeTool);
           if (adapter) {
-            const cleanedResponse = adapter.cleanResponse(outputBuffer);
+            const cleanedResponse = adapter.cleanResponse(newOutput);
             // Only add if there's meaningful content (not just prompts/empty)
             if (cleanedResponse && cleanedResponse.length > 20) {
               this.conversationHistory.push({
@@ -1187,6 +1187,8 @@ export class SDKSession {
                 role: 'assistant',
                 content: cleanedResponse,
               });
+              // Mark buffer position as saved so next detach only gets new content
+              manager.markBufferAsSaved();
               // Enforce history size limit
               while (this.conversationHistory.length > MAX_HISTORY_SIZE) {
                 this.conversationHistory.shift();
@@ -1243,18 +1245,20 @@ export class SDKSession {
         console.log(`${colors.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
 
         try {
-          // Save current buffer to conversation history
-          const outputBuffer = manager.getOutputBuffer();
-          if (outputBuffer && outputBuffer.length > 0) {
+          // Save only NEW output to conversation history (not the entire session)
+          const newOutput = manager.getNewOutputSinceLastSave();
+          if (newOutput && newOutput.length > 0) {
             const adapter = this.registry.get(currentTool);
             if (adapter) {
-              const cleanedResponse = adapter.cleanResponse(outputBuffer);
+              const cleanedResponse = adapter.cleanResponse(newOutput);
               if (cleanedResponse && cleanedResponse.length > 20) {
                 this.conversationHistory.push({
                   tool: currentTool,
                   role: 'assistant',
                   content: cleanedResponse,
                 });
+                // Mark buffer position as saved
+                manager.markBufferAsSaved();
                 while (this.conversationHistory.length > MAX_HISTORY_SIZE) {
                   this.conversationHistory.shift();
                 }

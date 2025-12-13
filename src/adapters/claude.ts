@@ -77,6 +77,7 @@ export class ClaudeAdapter implements ToolAdapter {
 
     if (!isSlashCommand) {
       args.push('-p'); // Print mode for regular prompts
+      args.push('--output-format', 'json'); // JSON output for clean response extraction
       // Note: We intentionally don't enable --tools or --permission-mode here
       // This makes print mode read-only (no file edits without user consent)
       // Use /i (interactive mode) for full tool access with approvals
@@ -118,14 +119,19 @@ export class ClaudeAdapter implements ToolAdapter {
     output = output.replace(/\x1b\[\d* ?q/g, '');
     output = output.replace(/\x1b\][^\x07]*\x07/g, ''); // OSC sequences
 
-    // Remove spinner frames
-    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+    // Remove spinner frames (all variants)
+    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·✢✳✶✻✽∴]/g, '');
 
     // Remove box drawing characters
     output = output.replace(/[╭╮╰╯│─┌┐└┘├┤┬┴┼║═╔╗╚╝╠╣╦╩╬▐▛▜▝▘]/g, '');
 
     // Remove common status line patterns (e.g., "Reading file...", "Thinking...")
-    output = output.replace(/^(Reading|Writing|Analyzing|Thinking|Searching|Running).*$/gm, '');
+    output = output.replace(/^(Reading|Writing|Analyzing|Thinking|Searching|Running|Actioning).*$/gm, '');
+
+    // Remove status indicators with escape hints
+    output = output.replace(/^.*\(esc to interrupt\).*$/gm, '');
+    output = output.replace(/^.*\(ctrl\+o to show thinking\).*$/gm, '');
+    output = output.replace(/^.*Thought for \d+s.*$/gm, '');
 
     // Remove the prompt line itself (❯ followed by tool name → )
     output = output.replace(/❯\s*[a-z]+\s*→.*$/gm, '');
@@ -194,6 +200,23 @@ export class ClaudeAdapter implements ToolAdapter {
       output = responseBlocks.join('\n\n');
     }
 
+    // Remove user prompt lines (lines starting with > followed by the user's message)
+    output = output.replace(/^>\s+.+$/gm, '');
+
+    // Remove duplicate consecutive lines (from progressive streaming)
+    const dedupLines = output.split('\n');
+    const dedupedLines: string[] = [];
+    for (let i = 0; i < dedupLines.length; i++) {
+      const line = dedupLines[i];
+      const prevLine = dedupedLines[dedupedLines.length - 1];
+      // Skip if this line is same as previous (ignoring whitespace)
+      if (prevLine !== undefined && line.trim() === prevLine.trim() && line.trim().length > 0) {
+        continue;
+      }
+      dedupedLines.push(line);
+    }
+    output = dedupedLines.join('\n');
+
     // Final cleanup
     output = output.replace(/\n{3,}/g, '\n\n');
     output = output.replace(/^\s+$/gm, '');
@@ -210,6 +233,15 @@ export class ClaudeAdapter implements ToolAdapter {
     });
 
     if (result.exitCode !== 0) {
+      // Try to parse error from JSON response
+      try {
+        const errorJson = JSON.parse(result.stdout);
+        if (errorJson.result) {
+          throw new Error(errorJson.result);
+        }
+      } catch {
+        // Fall back to raw error message
+      }
       const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
       throw new Error(`Claude Code exited with code ${result.exitCode}: ${errorMsg}`);
     }
@@ -217,8 +249,17 @@ export class ClaudeAdapter implements ToolAdapter {
     // Mark that we now have an active session
     this.hasActiveSession = true;
 
-    // Return stdout (already plain text in print mode)
-    return result.stdout.trim();
+    // Parse JSON response and extract the result field
+    try {
+      const response = JSON.parse(result.stdout);
+      if (response.is_error) {
+        throw new Error(response.result || 'Unknown error from Claude');
+      }
+      return response.result || '';
+    } catch (parseError) {
+      // Fallback: if JSON parsing fails, return raw output (for compatibility)
+      return result.stdout.trim();
+    }
   }
   
   resetContext(): void {

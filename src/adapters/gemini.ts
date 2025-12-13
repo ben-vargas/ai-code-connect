@@ -33,9 +33,13 @@ export class GeminiAdapter implements ToolAdapter {
   
   getCommand(prompt: string, options?: SendOptions): string[] {
     const args: string[] = [];
-    
-    // Resume previous session if we've already made a call
-    const shouldContinue = options?.continueSession !== false && this.hasActiveSession;
+
+    // JSON output for clean response extraction
+    args.push('--output-format', 'json');
+
+    // Resume previous session if we've already made a call (non-interactive or interactive)
+    const shouldContinue = options?.continueSession !== false &&
+      (this.hasActiveSession || this.hasStartedInteractiveSession);
     if (shouldContinue) {
       args.push('--resume', 'latest');
     }
@@ -45,14 +49,15 @@ export class GeminiAdapter implements ToolAdapter {
 
     // Add the prompt as the last argument (positional)
     args.push(prompt);
-    
+
     return ['gemini', ...args];
   }
 
   getInteractiveCommand(options?: SendOptions): string[] {
     const args: string[] = [];
-    // Resume session if we have one
-    if (options?.continueSession !== false && this.hasActiveSession) {
+    // Resume session if we have one (non-interactive or interactive)
+    if (options?.continueSession !== false &&
+        (this.hasActiveSession || this.hasStartedInteractiveSession)) {
       args.push('--resume', 'latest');
     }
     return ['gemini', ...args];
@@ -79,8 +84,8 @@ export class GeminiAdapter implements ToolAdapter {
     // Remove "Loaded cached credentials." line
     output = output.replace(/Loaded cached credentials\.?\s*/g, '');
 
-    // Remove spinner frames
-    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+    // Remove spinner frames (all variants including status indicators)
+    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·✢✳✶✻✽∴⏺]/g, '');
 
     // Remove box drawing characters and lines made of them
     output = output.replace(/[╭╮╰╯│─┌┐└┘├┤┬┴┼║═╔╗╚╝╠╣╦╩╬]/g, '');
@@ -153,6 +158,9 @@ export class GeminiAdapter implements ToolAdapter {
       }
     }
 
+    // Remove user prompt lines (lines starting with > followed by the user's message)
+    output = output.replace(/^>\s+.+$/gm, '');
+
     // Clean up any remaining line-based garbage
     const cleanedLines = output.split('\n').filter(line => {
       const trimmed = line.trim();
@@ -161,6 +169,20 @@ export class GeminiAdapter implements ToolAdapter {
       return true;
     });
     output = cleanedLines.join('\n');
+
+    // Remove duplicate consecutive lines (from progressive streaming)
+    const lines = output.split('\n');
+    const dedupedLines: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const prevLine = dedupedLines[dedupedLines.length - 1];
+      // Skip if this line is same as previous (ignoring whitespace)
+      if (prevLine !== undefined && line.trim() === prevLine.trim() && line.trim().length > 0) {
+        continue;
+      }
+      dedupedLines.push(line);
+    }
+    output = dedupedLines.join('\n');
 
     // Final cleanup
     output = output.replace(/\n{3,}/g, '\n\n');
@@ -178,6 +200,15 @@ export class GeminiAdapter implements ToolAdapter {
     });
 
     if (result.exitCode !== 0) {
+      // Try to parse error from JSON response
+      try {
+        const errorJson = JSON.parse(result.stdout);
+        if (errorJson.response) {
+          throw new Error(errorJson.response);
+        }
+      } catch {
+        // Fall back to raw error message
+      }
       const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
       throw new Error(`Gemini CLI exited with code ${result.exitCode}: ${errorMsg}`);
     }
@@ -185,8 +216,14 @@ export class GeminiAdapter implements ToolAdapter {
     // Mark that we now have an active session
     this.hasActiveSession = true;
 
-    // Return stdout
-    return result.stdout.trim();
+    // Parse JSON response and extract the response field
+    try {
+      const jsonResponse = JSON.parse(result.stdout);
+      return jsonResponse.response || '';
+    } catch (parseError) {
+      // Fallback: if JSON parsing fails, return raw output (for compatibility)
+      return result.stdout.trim();
+    }
   }
   
   resetContext(): void {
