@@ -130,7 +130,7 @@ When you type `//command`:
 1. AIC enters interactive mode with the tool
 2. Sends the `/command` for you
 3. You see the full output and can interact
-4. Press `Ctrl+]` when done to return to AIC
+4. Press `Ctrl+]` or `Ctrl+\` when done to return to AIC
 
 This approach ensures you can fully view and interact with commands like `/status` that show interactive UIs.
 
@@ -169,10 +169,10 @@ For full tool access (approvals, multi-turn interactions, etc.):
 ❯ claude → /i
 
 ▶ Starting Claude Code interactive mode...
-Press Ctrl+] to detach • /exit to terminate
+Press Ctrl+] or Ctrl+\ to detach • /exit to terminate
 
 > (interact with Claude directly)
-> (press Ctrl+])           # Detach back to aic
+> (press Ctrl+] or Ctrl+\) # Detach back to aic
 
 ⏸ Detached from Claude Code (still running)
 Use /i to re-attach
@@ -182,10 +182,11 @@ Use /i to re-attach
 ```
 
 **Key bindings in interactive mode:**
-- `Ctrl+]` - Detach (tool keeps running)
+- `Ctrl+]` or `Ctrl+\` - Detach (tool keeps running)
+- `Ctrl+6` - Quick toggle to the other tool
 - `/exit` - Terminate the tool session
 
-> **Tip:** Use `//status` or `//cost` to quickly run tool commands—AIC will enter interactive mode, run the command, and you press `Ctrl+]` when done.
+> **Tip:** Use `//status` or `//cost` to quickly run tool commands—AIC will enter interactive mode, run the command, and you press `Ctrl+]` or `Ctrl+\` when done.
 
 > **Note:** Messages exchanged while in interactive mode (after `/i`) are not captured for forwarding. Use regular mode for conversations you want to forward between tools.
 
@@ -203,7 +204,7 @@ Gemini CLI responds:
 
 > I'll implement those changes. Allow me to edit src/api.ts? [y/n]: y
 > (you can respond to prompts)
-> (press Ctrl+] when done to return to aic)
+> (press Ctrl+] or Ctrl+\ when done to return to aic)
 ```
 
 This is useful when:

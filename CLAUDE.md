@@ -36,3 +36,4 @@
 - Use `spawn()` with arrays, never `exec()` with string interpolation.
 - Config files should use mode `0o600`.
 - when commiting changes to git DO NOT add Generated nu Claude or Co-Authored by Claude messages
+- always run build and link after tests are passed and the cli is ready to be tested
