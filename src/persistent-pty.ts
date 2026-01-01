@@ -2,7 +2,7 @@ import * as pty from 'node-pty';
 import { IPty } from 'node-pty';
 import xtermHeadless from '@xterm/headless';
 import serializeAddonPkg from '@xterm/addon-serialize';
-import { stripAnsi } from './utils.js';
+import { stripAnsi, resolveCommandPath } from './utils.js';
 
 // ESM/CJS compatibility
 const { Terminal } = xtermHeadless;
@@ -243,7 +243,7 @@ export class PersistentPtyManager {
    * @param cwd Working directory
    * @param waitForReady If false, returns immediately after spawning (for interactive mode)
    */
-  spawn(cwd: string, waitForReady: boolean = true): Promise<void> {
+  async spawn(cwd: string, waitForReady: boolean = true): Promise<void> {
     if (this.pty && this.state !== PtyState.DEAD) {
       return Promise.resolve();
     }
@@ -271,7 +271,12 @@ export class PersistentPtyManager {
       }, 2000);
     });
 
-    this.pty = pty.spawn(this.config.command, this.config.args, {
+    // Resolve the command to an absolute path to avoid posix_spawnp errors
+    // This is critical for environments where PATH is not inherited correctly (e.g. macOS Homebrew)
+    const resolvedCommand = await resolveCommandPath(this.config.command);
+    const commandToRun = resolvedCommand || this.config.command;
+
+    this.pty = pty.spawn(commandToRun, this.config.args, {
       name: 'xterm-256color',
       cols: process.stdout.columns || 80,
       rows: process.stdout.rows || 24,

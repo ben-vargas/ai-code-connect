@@ -140,25 +140,76 @@ export async function runCommandPty(
   });
 }
 
+import { existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+
 /**
  * Check if a command exists in PATH
  * Uses 'where' on Windows, 'which' on Unix-like systems
  */
 export async function commandExists(command: string): Promise<boolean> {
+  const resolved = await resolveCommandPath(command);
+  return resolved !== null;
+}
+
+/**
+ * Resolve the absolute path of a command
+ * Returns null if not found
+ */
+export async function resolveCommandPath(command: string): Promise<string | null> {
   // Security: Validate command name to prevent injection
   // Only allow alphanumeric, dash, and underscore
-  if (!/^[a-zA-Z0-9_-]+$/.test(command)) {
-    return false;
+  // If it contains slashes/backslashes, assume it's already a path and return as is (if valid)
+  if (command.includes('/') || command.includes('\\')) {
+    return existsSync(command) ? command : null;
   }
 
+  if (!/^[a-zA-Z0-9_-]+$/.test(command)) {
+    return null;
+  }
+
+  // 1. Try 'which' / 'where' first (system PATH)
   try {
-    // Use 'where' on Windows, 'which' on Unix-like systems
     const whichCommand = process.platform === 'win32' ? 'where' : 'which';
     const result = await runCommand(whichCommand, [command]);
-    return result.exitCode === 0 && result.stdout.trim().length > 0;
+    
+    if (result.exitCode === 0 && result.stdout.trim().length > 0) {
+      // Get first line in case of multiple results
+      const lines = result.stdout.trim().split(/\r?\n/);
+      const path = lines[0].trim();
+      if (path && existsSync(path)) {
+        return path;
+      }
+    }
   } catch {
-    return false;
+    // Ignore errors from 'which'
   }
+
+  // 2. Check common locations manually (if 'which' failed or returned invalid path)
+  const commonPaths = [
+    '/opt/homebrew/bin',          // Apple Silicon Homebrew
+    '/usr/local/bin',             // Intel Mac / Linux
+    '/usr/bin',                   // Standard System
+    join(homedir(), '.npm-global', 'bin'), // Common manual npm global path
+    // Add more if needed
+  ];
+
+  for (const dir of commonPaths) {
+    const fullPath = join(dir, command);
+    if (process.platform === 'win32') {
+      // On Windows, check for .exe, .cmd, .ps1
+      if (existsSync(fullPath + '.exe')) return fullPath + '.exe';
+      if (existsSync(fullPath + '.cmd')) return fullPath + '.cmd';
+      if (existsSync(fullPath + '.ps1')) return fullPath + '.ps1';
+    } else {
+      if (existsSync(fullPath)) {
+        return fullPath;
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
