@@ -88,10 +88,8 @@ export class ClaudeAdapter implements ToolAdapter {
       args.push(...this.getSessionArgs());
     }
 
-    // Add the prompt as the last argument (only for non-slash commands in print mode)
-    if (!isSlashCommand) {
-      args.push(prompt);
-    }
+    // Note: prompt is passed via stdin in send() to avoid Windows shell escaping issues
+    // Do NOT add prompt as command-line argument
 
     return ['claude', ...args];
   }
@@ -228,9 +226,10 @@ export class ClaudeAdapter implements ToolAdapter {
     // For print mode (-p), use non-interactive runCommand to avoid messing with stdin
     const args = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start
 
+    // Pass prompt via stdin to avoid Windows shell escaping/truncation issues
     const result = await runCommand('claude', args, {
       cwd: options?.cwd || process.cwd(),
-    });
+    }, prompt);
 
     if (result.exitCode !== 0) {
       // Try to parse error from JSON response

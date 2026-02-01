@@ -9,33 +9,56 @@ export interface RunResult {
 
 /**
  * Run a command and capture its output (non-interactive)
+ *
+ * @param command - The command to run
+ * @param args - Array of arguments
+ * @param options - Spawn options (cwd, env, etc.)
+ * @param input - Optional input to write to stdin (for passing prompts on Windows)
  */
 export async function runCommand(
   command: string,
   args: string[],
-  options: SpawnOptions = {}
+  options: SpawnOptions = {},
+  input?: string
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
+    const hasInput = input !== undefined;
     const proc = spawn(command, args, {
       ...options,
-      stdio: ['ignore', 'pipe', 'pipe'], // ignore stdin - we're not sending input
+      stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      // On Windows, npm global packages are .cmd files which require shell execution
+      shell: process.platform === 'win32',
     });
-    
+
+    // Handle stdin with EPIPE protection
+    // If the process crashes immediately, writing to stdin throws EPIPE
+    if (hasInput && proc.stdin) {
+      proc.stdin.on('error', (err: NodeJS.ErrnoException) => {
+        // EPIPE errors happen when the process closes before we finish writing
+        // This is expected in some error cases - don't crash the parent process
+        if (err.code !== 'EPIPE') {
+          console.error('Stdin error:', err.message);
+        }
+      });
+      proc.stdin.write(input);
+      proc.stdin.end();
+    }
+
     let stdout = '';
     let stderr = '';
-    
+
     proc.stdout?.on('data', (data) => {
       stdout += data.toString();
     });
-    
+
     proc.stderr?.on('data', (data) => {
       stderr += data.toString();
     });
-    
+
     proc.on('error', (err) => {
       reject(err);
     });
-    
+
     proc.on('close', (code) => {
       resolve({
         stdout,
