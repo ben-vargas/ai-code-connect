@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Contributors
 
-- [@mickboyle](https://github.com/mickboyle) - Windows compatibility fixes (#2)
+🙏 **Thank you [@mickboyle](https://github.com/mickboyle)** for the Windows compatibility fixes in PR [#2](https://github.com/jacob-bd/ai-code-connect/pull/2)! This contribution makes AIC accessible to the entire Windows developer community.
 
 ---
 
